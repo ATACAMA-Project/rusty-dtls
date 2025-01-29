@@ -1,0 +1,47 @@
+[package]
+name = "rusty-dtls"
+version = "0.1.0"
+edition = "2021"
+autotests = true
+
+[dependencies]
+aes-gcm = { version = "0.10.0", default-features = false, features = ["aes"] }
+sha2 = { version = "0.10.8", default-features = false }
+hkdf = "0.12.4"
+log = { version = "0.4" }
+heapless = "0.8.0"
+rand_core = { version = "0.6.4", default-features = false }
+
+embedded-hal-async = { version = "1", optional = true }
+embedded-time = { version = "0.12.1", optional = true }
+embedded-nal-async = { version = "0.8.0", optional = true }
+embassy-futures = { version = "0.1.1", optional = true }
+
+[dev-dependencies]
+rand = "0.8.5"
+simple_logger = { version = "4.3.3", default-features = false, features = ["colors"] }
+std-embedded-time = "0.1.0"
+std-embedded-nal-async = "0.3.0"
+linux-embedded-hal = { git= "https://github.com/rust-embedded/linux-embedded-hal.git", features = ["async-tokio"]}
+tokio = { version = "1.43.0", features = ["rt","rt-multi-thread", "macros"]}
+
+[features]
+
+async = [
+  "dep:embedded-hal-async",
+  "dep:embedded-time",
+  "dep:embedded-nal-async",
+  "dep:embassy-futures",
+]
+
+silent = ["log/max_level_off", "log/release_max_level_off"]
+
+aes128gcm_sha256 = []
+
+[[example]]
+name = "echo"
+required-features = ["aes128gcm_sha256"] 
+
+[[example]]
+name = "echo_async"
+required-features = ["aes128gcm_sha256", "async"] 
