@@ -74,7 +74,7 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
                             c,
                             &now_ms,
                             ctx,
-                            &mut handshake.rt_queue,
+                            &mut handshake.net_queue,
                             conn,
                             self.rng,
                             self.staging_buffer,
@@ -84,7 +84,7 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
                             s,
                             &now_ms,
                             ctx,
-                            &mut handshake.rt_queue,
+                            &mut handshake.net_queue,
                             conn,
                             self.rng,
                             self.staging_buffer,
@@ -247,16 +247,18 @@ fn try_send_alert_sync<T>(
 mod tests {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use crate::{DtlsStack, HandshakeSlot};
+    use crate::{DtlsStack, HandshakeSlot, NetQueue};
 
     #[test]
     pub fn fail_open_more_handshakes_than_connections() {
+        let mut netq_1 = NetQueue::new();
+        let mut netq_2 = NetQueue::new();
         let mut rng = rand::thread_rng();
         let mut send_to_peer = |_: &SocketAddr, _: &[u8]| {};
         let mut stack = DtlsStack::<1>::new(&mut rng, &mut [], &mut send_to_peer).unwrap();
         let mut hs = [
-            HandshakeSlot::new(&[], &mut []),
-            HandshakeSlot::new(&[], &mut []),
+            HandshakeSlot::new(&[], &mut netq_1),
+            HandshakeSlot::new(&[], &mut netq_2),
         ];
         let res = stack.open_connection(
             &mut hs[0],
@@ -272,11 +274,12 @@ mod tests {
 
     #[test]
     pub fn closing_connections_works() {
+        let mut netq = NetQueue::new();
         let mut rng = rand::thread_rng();
         let mut send_to_peer = |_: &SocketAddr, _: &[u8]| {};
         let mut b = [0; 250];
         let mut stack = DtlsStack::<1>::new(&mut rng, &mut b, &mut send_to_peer).unwrap();
-        let mut hs = [HandshakeSlot::new(&[], &mut [])];
+        let mut hs = [HandshakeSlot::new(&[], &mut netq)];
         let res = stack.open_connection(
             &mut hs[0],
             &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -297,10 +300,11 @@ mod tests {
 
     #[test]
     pub fn try_close_non_open_connection() {
+        let mut netq = NetQueue::new();
         let mut rng = rand::thread_rng();
         let mut send_to_peer = |_: &SocketAddr, _: &[u8]| {};
         let mut stack = DtlsStack::<1>::new(&mut rng, &mut [], &mut send_to_peer).unwrap();
-        let mut hs = [HandshakeSlot::new(&[], &mut [])];
+        let mut hs = [HandshakeSlot::new(&[], &mut netq)];
         let res = stack.open_connection(
             &mut hs[0],
             &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),

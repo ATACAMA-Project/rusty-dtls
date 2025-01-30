@@ -3,6 +3,7 @@ use core::panic;
 use log::trace;
 
 use crate::crypto::{PskTranscriptHash, TrafficSecret};
+use crate::netqueue::{ClientResend, HandshakeHeader, NetQueue, NetQueueState, ServerResend};
 use crate::parsing::{
     encode_encrypted_extensions, encode_finished, encode_pre_shared_key_client_binders,
     encode_server_hello, parse_encrypted_extensions, parse_finished, parse_server_hello, Cookie,
@@ -14,7 +15,7 @@ use crate::{
     record_parsing::RecordContentType,
     DtlsError, DtlsPoll,
 };
-use crate::{AlertDescription, DtlsConnection, EpochShort, EpochState, RecordQueue, TimeStampMs};
+use crate::{AlertDescription, DtlsConnection, EpochShort, EpochState, TimeStampMs};
 
 pub struct HandshakeContext<'a> {
     pub recv_handshake_seq_num: u8,
@@ -228,7 +229,7 @@ pub fn process_client(
     state: &mut ClientState,
     now_ms: &TimeStampMs,
     ctx: &mut HandshakeContext,
-    record_queue: &mut RecordQueue<'_>,
+    net_queue: &mut NetQueue,
     conn: &mut DtlsConnection,
     rng: &mut dyn rand_core::CryptoRngCore,
 ) -> Result<(DtlsPoll, Option<SendTask>), DtlsError> {
@@ -236,16 +237,16 @@ pub fn process_client(
     let poll = match state {
         ClientState::Start => {
             trace!("[Client] Send client_hello");
-            record_queue.clear_record_queue();
-            let entry = alloc_client_hello(ctx, record_queue, rng, now_ms)?;
-            send_task = Some(SendTask::new(entry, 0));
+            net_queue.state = NetQueueState::ClientResend(ClientResend::ClientHello(Default::default()));
+            alloc_client_hello(ctx, net_queue, rng, now_ms)?;
+            send_task = Some(SendTask::new(0, 0));
             *state = ClientState::WaitServerHello;
             DtlsPoll::Wait
         }
         ClientState::ReceivedHelloRetry => {
             trace!("[Client] Send updated client_hello");
-            let entry = alloc_client_hello(ctx, record_queue, rng, now_ms)?;
-            send_task = Some(SendTask::new(entry, 0));
+            alloc_client_hello(ctx, net_queue, rng, now_ms)?;
+            send_task = Some(SendTask::new(0, 0));
             *state = ClientState::WaitServerHello;
             DtlsPoll::Wait
         }
@@ -259,12 +260,12 @@ pub fn process_client(
         ClientState::WaitEncryptedExtensions => DtlsPoll::Wait,
         ClientState::WaitFinished => DtlsPoll::Wait,
         ClientState::SendFinished => {
-            record_queue.clear_record_queue();
+            net_queue.state = NetQueueState::ClientResend(ClientResend::Finished(Default::default()));
             ctx.info
                 .advance_to_epoch_three(conn, "s ap traffic", "c ap traffic")?;
             trace!("[Client] Send finished");
-            let entry = alloc_client_finish(ctx, record_queue, conn, now_ms)?;
-            send_task = Some(SendTask::new(entry, 2));
+            alloc_client_finish(ctx, net_queue, conn, now_ms)?;
+            send_task = Some(SendTask::new(0, 2));
             *state = ClientState::WaitServerAck;
             DtlsPoll::Wait
         }
@@ -276,58 +277,61 @@ pub fn process_client(
 
 fn alloc_client_hello(
     ctx: &mut HandshakeContext,
-    record_queue: &mut RecordQueue<'_>,
+    net_queue: &mut NetQueue,
     rng: &mut dyn rand_core::CryptoRngCore,
     now_ms: &TimeStampMs,
-) -> Result<usize, DtlsError> {
+) -> Result<(), DtlsError> {
     let seq_num = ctx.next_send_seq_num();
-    record_queue.alloc_rt_entry_with_cookie(0, now_ms, &mut |buffer, cookie| {
-        let mut handshake =
-            EncodeHandshakeMessage::new(buffer, HandshakeType::ClientHello, seq_num)?;
-        let (_, binders_len) = encode_client_hello(
-            handshake.payload_buffer(),
-            &mut ctx.info,
-            CipherSuite::all(),
-            now_ms,
-            rng,
-            cookie,
-        )?;
-        handshake.partial_transcript_hash(binders_len, &mut ctx.info.crypto);
-        encode_pre_shared_key_client_binders(
-            &mut handshake.binders_buffer(),
-            ctx.info.selected_cipher_suite,
-            ctx.info.available_psks,
-            &mut ctx.info.crypto,
-        )?;
-        handshake.finish_partial_transcript_hash(&mut ctx.info.crypto);
-        Ok(())
-    })
+    net_queue
+        .alloc_client_hello_with_cookie(0, now_ms, &mut |buffer, cookie| {
+            let mut handshake =
+                EncodeHandshakeMessage::new(buffer, HandshakeType::ClientHello, seq_num)?;
+            let (_, binders_len) = encode_client_hello(
+                handshake.payload_buffer(),
+                &mut ctx.info,
+                CipherSuite::all(),
+                now_ms,
+                rng,
+                cookie,
+            )?;
+            handshake.partial_transcript_hash(binders_len, &mut ctx.info.crypto);
+            encode_pre_shared_key_client_binders(
+                &mut handshake.binders_buffer(),
+                ctx.info.selected_cipher_suite,
+                ctx.info.available_psks,
+                &mut ctx.info.crypto,
+            )?;
+            handshake.finish_partial_transcript_hash(&mut ctx.info.crypto);
+            Ok(())
+        })
 }
 
 fn alloc_client_finish(
     ctx: &mut HandshakeContext,
-    record_queue: &mut RecordQueue<'_>,
+    net_queue: &mut NetQueue,
     conn: &mut DtlsConnection,
-    now_ms: &TimeStampMs,
-) -> Result<usize, DtlsError> {
+    now_ms: &u64,
+) -> Result<(), DtlsError> {
     let seq_num = ctx.next_send_seq_num();
     let epoch_state = &mut conn.epochs[2];
-    record_queue.alloc_rt_entry(2, now_ms, &mut |buffer| -> Result<(), DtlsError> {
-        let mut handshake = EncodeHandshakeMessage::new(buffer, HandshakeType::Finished, seq_num)?;
-        encode_finished(
-            handshake.payload_buffer(),
-            &epoch_state.write_traffic_secret,
-            ctx.info.crypto.crypto_state_mut()?,
-        )?;
-        handshake.finish(&mut ctx.info.crypto);
-        Ok(())
-    })
+    net_queue
+        .alloc_client_finish(2, now_ms, &mut |buffer| -> Result<(), DtlsError> {
+            let mut handshake =
+                EncodeHandshakeMessage::new(buffer, HandshakeType::Finished, seq_num)?;
+            encode_finished(
+                handshake.payload_buffer(),
+                &epoch_state.write_traffic_secret,
+                ctx.info.crypto.crypto_state_mut()?,
+            )?;
+            handshake.finish(&mut ctx.info.crypto);
+            Ok(())
+        })
 }
 
 pub fn handle_handshake_message_client(
     state: &mut ClientState,
     ctx: &mut HandshakeContext,
-    record_queue: &mut RecordQueue<'_>,
+    net_queue: &mut NetQueue,
     conn: &mut DtlsConnection,
     content_type: RecordContentType,
     message: ParseBuffer<&mut [u8]>,
@@ -337,7 +341,7 @@ pub fn handle_handshake_message_client(
     let buf = message.clone();
     handle_handshake_message(
         ctx,
-        record_queue,
+        net_queue,
         content_type,
         message,
         &mut |info, handshake_type, handshake| {
@@ -345,9 +349,11 @@ pub fn handle_handshake_message_client(
             Ok(())
         },
     )?;
+    if *state == ClientState::WaitEncryptedExtensions && !matches!(net_queue.state, NetQueueState::ClientReorder(_)) {
+        net_queue.state = NetQueueState::ClientReorder(None);
+    }
     if let Some(cookie) = cookie {
-        record_queue.clear_record_queue();
-        record_queue
+        net_queue
             .store_cookie(&buf.complete_inner_buffer()[cookie.index..cookie.index + cookie.len])?;
     }
     Ok(())
@@ -355,7 +361,7 @@ pub fn handle_handshake_message_client(
 
 fn handle_handshake_message(
     ctx: &mut HandshakeContext,
-    record_queue: &mut RecordQueue<'_>,
+    net_queue: &mut NetQueue,
     content_type: RecordContentType,
     message: ParseBuffer<&[u8]>,
     handle: &mut dyn FnMut(
@@ -364,23 +370,19 @@ fn handle_handshake_message(
         ParseHandshakeMessage,
     ) -> Result<(), DtlsError>,
 ) -> Result<(), DtlsError> {
-    let res = try_unpack_handshake_message(content_type, message, ctx, record_queue)?;
+    let res = try_unpack_handshake_message(content_type, message, ctx, net_queue)?;
     if let Some((handshake, handshake_type)) = res {
         handle(&mut ctx.info, handshake_type, handshake)?;
         ctx.recv_handshake_seq_num += 1;
     }
-    loop {
-        if let Some(msg) =
-            record_queue.try_find_handshake_message_index(ctx.recv_handshake_seq_num as u16)
-        {
-            let message = record_queue.get_handshake_buffer(msg)?;
-            let (handshake, handshake_type, _) = ParseHandshakeMessage::new(message)?;
+    if let NetQueueState::ClientReorder(Some(fin)) = &net_queue.state {
+        let message_seq: u16 = fin.hs_seq();
+        if message_seq == ctx.recv_handshake_seq_num as u16 {
+            let buffer = ParseBuffer::init(fin.as_bytes());
+            let (handshake, handshake_type, _) = ParseHandshakeMessage::new(buffer)?;
             handle(&mut ctx.info, handshake_type, handshake)?;
             ctx.recv_handshake_seq_num += 1;
-            record_queue.free_entry(msg);
-            continue;
         }
-        break;
     }
     Ok(())
 }
@@ -389,14 +391,14 @@ fn try_unpack_handshake_message<'b>(
     content_type: RecordContentType,
     mut message: ParseBuffer<&'b [u8]>,
     ctx: &mut HandshakeContext,
-    record_queue: &mut RecordQueue<'_>,
+    net_queue: &mut NetQueue,
 ) -> Result<Option<(ParseHandshakeMessage<'b>, HandshakeType)>, DtlsError> {
     if content_type == RecordContentType::Ack {
         let mut ack = ParseAck::new(&mut message)?;
         while let Some((epoch, seq_num)) = ack.next_entry() {
-            record_queue.ack(&epoch, &seq_num);
+            net_queue.ack(&epoch, &seq_num);
         }
-        record_queue.schedule_all_unacked_rt_entries();
+        net_queue.schedule_all_unacked_rt_entries();
 
         return Ok(None);
     }
@@ -411,18 +413,28 @@ fn try_unpack_handshake_message<'b>(
     if seq_num != expected_seq_num as u16 {
         let message = handshake.abort_parsing();
         if seq_num > expected_seq_num as u16 {
-            trace!(
-                "Saving handshake message to record_queue with too new handshake_seq_num: {}",
-                seq_num
-            );
-            let res = record_queue.alloc_reordering_entry(seq_num, &mut |buf| {
-                buf.expect_length(message.capacity())?;
-                buf.write_into(&message.complete_inner_buffer()[message_start..]);
-                Ok(())
-            });
-            match res {
-                Ok(()) | Err(DtlsError::OutOfMemory) => Ok(None),
-                Err(err) => Err(err),
+            if handshake_type == HandshakeType::Finished {
+                // would maybe be better to check for ClientState::WaitEncryptedExtensions, but it's not available here
+                if let NetQueueState::ClientReorder(_) = &mut net_queue.state {
+                    trace!(
+                        "Saving finish message to record_queue with too new handshake_seq_num: {}",
+                        seq_num
+                    );
+                    let res = net_queue
+                        .alloc_client_reorder(seq_num, &mut |buf| {
+                            buf.expect_length(message.capacity())?;
+                            buf.write_into(&message.complete_inner_buffer()[message_start..]);
+                            Ok(())
+                        });
+                    match res {
+                        Ok(()) | Err(DtlsError::OutOfMemory) => Ok(None),
+                        Err(err) => Err(err),
+                    }
+                } else {
+                    Ok(None)
+                }
+            } else {
+                Ok(None)
             }
         } else {
             trace!(
@@ -509,7 +521,7 @@ pub fn process_server(
     state: &mut ServerState,
     now_ms: &TimeStampMs,
     ctx: &mut HandshakeContext,
-    record_queue: &mut RecordQueue<'_>,
+    net_queue: &mut NetQueue,
     conn: &mut DtlsConnection,
     rng: &mut dyn rand_core::CryptoRngCore,
 ) -> Result<(DtlsPoll, bool), DtlsError> {
@@ -517,9 +529,9 @@ pub fn process_server(
     let poll = match state {
         ServerState::RecvdClientHello => {
             trace!("[Server] Send server_hello");
-            record_queue.clear_record_queue();
+            net_queue.state = NetQueueState::ServerResend(ServerResend::default());
             let seq_num = ctx.next_send_seq_num();
-            record_queue.alloc_rt_entry(0, now_ms, &mut |buffer| {
+            net_queue.alloc_server_hello(0, now_ms, &mut |buffer| {
                 let mut handshake =
                     EncodeHandshakeMessage::new(buffer, HandshakeType::ServerHello, seq_num)?;
                 encode_server_hello(
@@ -539,7 +551,7 @@ pub fn process_server(
 
             trace!("[Server] Send encrypted_extensions");
             let seq_num = ctx.next_send_seq_num();
-            record_queue.alloc_rt_entry(2, now_ms, &mut |buffer| {
+            net_queue.alloc_encrypted_extensions(2, now_ms, &mut |buffer| {
                 let mut handshake = EncodeHandshakeMessage::new(
                     buffer,
                     HandshakeType::EncryptedExtension,
@@ -551,7 +563,7 @@ pub fn process_server(
             })?;
             trace!("[Server] Send finished");
             let seq_num = ctx.next_send_seq_num();
-            record_queue.alloc_rt_entry(2, now_ms, &mut |buffer| {
+            net_queue.alloc_server_finished(2, now_ms, &mut |buffer| {
                 let epoch_state = &mut conn.epochs[(conn.current_epoch as usize) & 3];
                 let mut handshake =
                     EncodeHandshakeMessage::new(buffer, HandshakeType::Finished, seq_num)?;
@@ -579,14 +591,14 @@ pub fn process_server(
 pub fn handle_handshake_message_server(
     state: &mut ServerState,
     ctx: &mut HandshakeContext,
-    record_queue: &mut RecordQueue<'_>,
+    net_queue: &mut NetQueue,
     conn: &mut DtlsConnection,
     content_type: RecordContentType,
     message: ParseBuffer<&mut [u8]>,
 ) -> Result<(), DtlsError> {
     handle_handshake_message(
         ctx,
-        record_queue,
+        net_queue,
         content_type,
         message.into_ref(),
         &mut |info, handshake_type, handshake| {

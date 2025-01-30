@@ -30,8 +30,9 @@ pub use asynchronous::{DtlsStackAsync, Event};
 
 mod sync;
 pub use sync::DtlsStack;
+pub use netqueue::NetQueue;
 
-mod buffer_record_queue;
+mod netqueue;
 mod crypto;
 mod handshake;
 mod parsing;
@@ -48,7 +49,6 @@ type RecordSeqNum = u64;
 type RecordSeqNumShort = u8;
 
 type Connections<'a> = [Option<DtlsConnection<'a>>];
-type RecordQueue<'a> = buffer_record_queue::BufferMessageQueue<'a>;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -310,7 +310,7 @@ fn try_pass_packet_to_handshake<'a>(
                     HandshakeState::Client(state) => handle_handshake_message_client(
                         state,
                         ctx,
-                        &mut handshake.rt_queue,
+                        &mut handshake.net_queue,
                         connection,
                         content_type,
                         packet,
@@ -318,7 +318,7 @@ fn try_pass_packet_to_handshake<'a>(
                     HandshakeState::Server(state) => handle_handshake_message_server(
                         state,
                         ctx,
-                        &mut handshake.rt_queue,
+                        &mut handshake.net_queue,
                         connection,
                         content_type,
                         packet,
@@ -463,7 +463,7 @@ fn try_open_new_handshake<'a>(
             cookie_key,
             addr,
             ctx,
-            &mut handshake_slot.rt_queue,
+            &mut handshake_slot.net_queue,
         ) {
             Ok(ClientHelloResult::MissingCookie) => {
                 trace!("Did not found valid cookie. Sending hello_retry");
@@ -581,7 +581,7 @@ fn stage_alert<'a>(
 }
 
 pub struct HandshakeSlot<'a> {
-    rt_queue: RecordQueue<'a>,
+    net_queue: &'a mut NetQueue,
     psks: &'a [Psk<'a>],
     state: HandshakeSlotState<'a>,
 }
@@ -611,9 +611,9 @@ pub enum HandshakeState {
 // }
 
 impl<'a> HandshakeSlot<'a> {
-    pub fn new(available_psks: &'a [Psk<'a>], buffer: &'a mut [u8]) -> Self {
+    pub fn new(available_psks: &'a [Psk<'a>], net_queue: &'a mut NetQueue) -> Self {
         HandshakeSlot {
-            rt_queue: RecordQueue::new(buffer),
+            net_queue,
             psks: available_psks,
             state: HandshakeSlotState::Empty,
         }
@@ -655,7 +655,7 @@ impl<'a> HandshakeSlot<'a> {
         } = mem::take(&mut self.state)
         {
             conn.handshake_finished = true;
-            self.rt_queue.reset();
+            self.net_queue.reset();
             let id = ctx.conn_id;
             self.state = HandshakeSlotState::Finished(ConnectionId(id));
         }
@@ -672,7 +672,7 @@ impl<'a> HandshakeSlot<'a> {
             }
             HandshakeSlotState::Empty | HandshakeSlotState::Finished(_) => {}
         }
-        self.rt_queue.reset();
+        self.net_queue.reset();
     }
 }
 

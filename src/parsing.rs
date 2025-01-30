@@ -1,10 +1,10 @@
-use crate::buffer_record_queue::BufferMessageQueue;
 use crate::crypto::{
     self, encode_binder_entry, validate_binder, CipherDependentCryptoState, CipherSuite, Psk,
     PskTranscriptHash, TrafficSecret,
 };
 use crate::handshake::{CryptoInformation, HandshakeContext, HandshakeInformation};
-use crate::{AlertDescription, AlertLevel, DtlsError, Epoch, HandshakeSeqNum, RecordSeqNum};
+use crate::netqueue::{NetQueueState, ServerResend};
+use crate::{AlertDescription, AlertLevel, DtlsError, Epoch, HandshakeSeqNum, NetQueue, RecordSeqNum};
 use aes_gcm::aead::Buffer;
 use core::mem;
 use core::net::SocketAddr;
@@ -772,7 +772,7 @@ pub fn parse_client_hello_first_pass(
     cookie_key: &[u8],
     peer_addr: &SocketAddr,
     ctx: &mut HandshakeContext,
-    record_queue: &mut BufferMessageQueue<'_>,
+    net_queue: &mut NetQueue,
 ) -> Result<ClientHelloResult, DtlsError> {
     // legacy version field ignored on server side (my way of understanding)
     buffer.add_offset(2);
@@ -826,7 +826,8 @@ pub fn parse_client_hello_first_pass(
                 // Set transcript hash to message_hash + HelloRetry
                 ctx.info.server_init_post_hello_retry_hash(cookie);
                 // Using space in the record queue to keep staging buffer valid.
-                record_queue.alloc_rt_entry(0, &0, &mut |buffer| {
+                net_queue.state = NetQueueState::ServerResend(ServerResend::default());
+                net_queue.alloc_server_hello(0, &0, &mut |buffer| {
                     let mut hs =
                         EncodeHandshakeMessage::new(buffer, HandshakeType::ServerHello, 0)?;
                     encode_hello_retry(
@@ -841,7 +842,7 @@ pub fn parse_client_hello_first_pass(
                     hs.finish(&mut ctx.info.crypto);
                     Ok(())
                 })?;
-                record_queue.clear_record_queue();
+                net_queue.reset();
                 found_valid_cookie = true;
                 Ok(())
             }

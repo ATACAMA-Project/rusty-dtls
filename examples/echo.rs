@@ -1,7 +1,7 @@
 use {
     core::time::Duration,
     rusty_dtls::ConnectionId,
-    rusty_dtls::{DtlsPoll, DtlsStack, HandshakeSlot, HashFunction, Psk},
+    rusty_dtls::{DtlsPoll, DtlsStack, HandshakeSlot, HashFunction, Psk, NetQueue},
     std::net::SocketAddr,
     std::net::UdpSocket,
     std::ops::Range,
@@ -37,6 +37,7 @@ fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
             }
         };
 
+    let mut net_queue = NetQueue::new();
     let mut staging_buffer = [0; 256];
     let mut rand = rand::thread_rng();
     let psks = [Psk::new(&[123], &[1, 2, 3, 4, 5], HashFunction::Sha256)];
@@ -44,12 +45,11 @@ fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
         DtlsStack::<10>::new(&mut rand, &mut staging_buffer, &mut send_to_peer).unwrap();
     stack.require_cookie(false);
 
-    let mut buffer = [0; 1024];
     let mut handshakes = Vec::new();
     if server {
-        handshakes.push(HandshakeSlot::new(&psks, &mut buffer));
+        handshakes.push(HandshakeSlot::new(&psks, &mut net_queue));
     } else {
-        handshakes.push(HandshakeSlot::new(&psks, &mut buffer));
+        handshakes.push(HandshakeSlot::new(&psks, &mut net_queue));
         assert!(stack.open_connection(
             &mut handshakes[0],
             &format!("127.0.0.1:{}", peer_port).parse().unwrap()
