@@ -15,7 +15,7 @@ use crate::{
     record_parsing::{EncodeCiphertextRecord, RecordContentType},
     stage_alert, try_open_new_handshake, try_pass_packet_to_connection,
     try_pass_packet_to_handshake, ConnectionId, DeferredAction, DtlsConnection, DtlsError,
-    DtlsPoll, EpochState, HandshakeSlot, HandshakeSlotState, HandshakeState,
+    DtlsPoll, EpochState, HandshakeSlot, HandshakeSlotState, HandshakeState, TimeStampMs,
 };
 
 use super::handshake::{process_client_sync, process_server_sync};
@@ -57,7 +57,7 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
     pub fn poll(
         &mut self,
         handshakes: &mut [HandshakeSlot],
-        now_ms: u64,
+        now_ms: TimeStampMs,
     ) -> Result<DtlsPoll, DtlsError> {
         let mut return_poll = DtlsPoll::Wait;
         for handshake in handshakes {

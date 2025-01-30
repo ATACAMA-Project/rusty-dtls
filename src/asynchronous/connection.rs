@@ -17,7 +17,7 @@ use crate::{
     record_parsing::{EncodeCiphertextRecord, RecordContentType},
     stage_alert, try_open_new_handshake, try_pass_packet_to_connection,
     try_pass_packet_to_handshake, ConnectionId, DeferredAction, DtlsConnection, DtlsError,
-    DtlsPoll, EpochState, HandshakeSlot, HandshakeSlotState, HandshakeState,
+    DtlsPoll, EpochState, HandshakeSlot, HandshakeSlotState, HandshakeState, TimeStampMs,
 };
 
 use super::handshake::{process_client_async, process_server_async};
@@ -226,7 +226,7 @@ where
 
     async fn poll_async(
         &mut self,
-        now_ms: &u64,
+        now_ms: &TimeStampMs,
         handshakes: &mut [HandshakeSlot<'_>],
     ) -> Result<DtlsPoll, DtlsError> {
         let mut return_poll = DtlsPoll::Wait;

@@ -2,12 +2,12 @@ use log::trace;
 
 use crate::{
     handshake::{process_client, process_server, ClientState, HandshakeContext, ServerState},
-    DtlsConnection, DtlsError, DtlsPoll, RecordQueue,
+    DtlsConnection, DtlsError, DtlsPoll, RecordQueue, TimeStampMs,
 };
 
 pub fn process_client_sync(
     state: &mut ClientState,
-    now_ms: &u64,
+    now_ms: &TimeStampMs,
     ctx: &mut HandshakeContext,
     record_queue: &mut RecordQueue<'_>,
     conn: &mut DtlsConnection,
@@ -45,7 +45,7 @@ pub fn process_client_sync(
 
 pub fn process_server_sync(
     state: &mut ServerState,
-    now_ms: &u64,
+    now_ms: &TimeStampMs,
     ctx: &mut HandshakeContext,
     record_queue: &mut RecordQueue<'_>,
     conn: &mut DtlsConnection,

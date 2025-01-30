@@ -20,10 +20,6 @@ use record_parsing::{
     parse_plaintext_record, parse_record, EncodeCiphertextRecord, EncodePlaintextRecord,
     RecordContentType,
 };
-use sha2::{
-    digest::{generic_array::GenericArray, OutputSizeUser},
-    Sha256,
-};
 
 mod fmt;
 
@@ -41,13 +37,14 @@ mod handshake;
 mod parsing;
 mod record_parsing;
 
-type RecordSeqNum = u64;
 type Epoch = u64;
+type EpochShort = u8;
 
 type TimeStampMs = u64;
 
 type HandshakeSeqNum = u16;
-type EpochShort = u8;
+
+type RecordSeqNum = u64;
 type RecordSeqNumShort = u8;
 
 type Connections<'a> = [Option<DtlsConnection<'a>>];
@@ -424,7 +421,7 @@ fn find_empty_connection_slot(connections: &mut [Option<DtlsConnection>]) -> Opt
 fn try_open_new_handshake<'a>(
     staging_buffer: &'a mut [u8],
     require_cookie: bool,
-    cookie_key: &GenericArray<u8, <Sha256 as OutputSizeUser>::OutputSize>,
+    cookie_key: &[u8],
     handshakes: &mut [HandshakeSlot],
     connections: &mut [Option<DtlsConnection>],
     addr: &SocketAddr,
@@ -506,7 +503,7 @@ fn try_open_new_handshake<'a>(
 
 fn stage_hello_retry_message<'a>(
     staging_buffer: &'a mut [u8],
-    cookie_key: &GenericArray<u8, <Sha256 as OutputSizeUser>::OutputSize>,
+    cookie_key: &[u8],
     addr: &SocketAddr,
     info: &mut HandshakeInformation,
 ) -> Result<&'a [u8], DtlsError> {

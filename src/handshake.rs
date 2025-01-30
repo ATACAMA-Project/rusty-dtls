@@ -14,7 +14,7 @@ use crate::{
     record_parsing::RecordContentType,
     DtlsError, DtlsPoll,
 };
-use crate::{AlertDescription, DtlsConnection, EpochShort, EpochState, RecordQueue};
+use crate::{AlertDescription, DtlsConnection, EpochShort, EpochState, RecordQueue, TimeStampMs};
 
 pub struct HandshakeContext<'a> {
     pub recv_handshake_seq_num: u8,
@@ -226,7 +226,7 @@ impl SendTask {
 
 pub fn process_client(
     state: &mut ClientState,
-    now_ms: &u64,
+    now_ms: &TimeStampMs,
     ctx: &mut HandshakeContext,
     record_queue: &mut RecordQueue<'_>,
     conn: &mut DtlsConnection,
@@ -278,7 +278,7 @@ fn alloc_client_hello(
     ctx: &mut HandshakeContext,
     record_queue: &mut RecordQueue<'_>,
     rng: &mut dyn rand_core::CryptoRngCore,
-    now_ms: &u64,
+    now_ms: &TimeStampMs,
 ) -> Result<usize, DtlsError> {
     let seq_num = ctx.next_send_seq_num();
     record_queue.alloc_rt_entry_with_cookie(0, now_ms, &mut |buffer, cookie| {
@@ -308,7 +308,7 @@ fn alloc_client_finish(
     ctx: &mut HandshakeContext,
     record_queue: &mut RecordQueue<'_>,
     conn: &mut DtlsConnection,
-    now_ms: &u64,
+    now_ms: &TimeStampMs,
 ) -> Result<usize, DtlsError> {
     let seq_num = ctx.next_send_seq_num();
     let epoch_state = &mut conn.epochs[2];
@@ -507,7 +507,7 @@ pub enum ServerState {
 
 pub fn process_server(
     state: &mut ServerState,
-    now_ms: &u64,
+    now_ms: &TimeStampMs,
     ctx: &mut HandshakeContext,
     record_queue: &mut RecordQueue<'_>,
     conn: &mut DtlsConnection,

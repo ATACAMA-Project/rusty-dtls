@@ -2,14 +2,14 @@ use log::trace;
 
 use crate::{
     handshake::{process_client, process_server, ClientState, HandshakeContext, ServerState},
-    DtlsConnection, DtlsError, DtlsPoll, RecordQueue,
+    DtlsConnection, DtlsError, DtlsPoll, RecordQueue, TimeStampMs,
 };
 
 use super::SocketAndAddr;
 
 pub async fn process_client_async<Socket: embedded_nal_async::UnconnectedUdp>(
     state: &mut ClientState,
-    now_ms: &u64,
+    now_ms: &TimeStampMs,
     ctx: &mut HandshakeContext<'_>,
     record_queue: &mut RecordQueue<'_>,
     conn: &mut DtlsConnection<'_>,
@@ -49,7 +49,7 @@ pub async fn process_client_async<Socket: embedded_nal_async::UnconnectedUdp>(
 
 pub async fn process_server_async<Socket: embedded_nal_async::UnconnectedUdp>(
     state: &mut ServerState,
-    now_ms: &u64,
+    now_ms: &TimeStampMs,
     ctx: &mut HandshakeContext<'_>,
     record_queue: &mut RecordQueue<'_>,
     conn: &mut DtlsConnection<'_>,
