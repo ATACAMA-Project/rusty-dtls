@@ -6,6 +6,9 @@ use crate::{
     DtlsError, DtlsPoll, Epoch, EpochShort, EpochState, HandshakeSeqNum, RecordSeqNum, TimeStampMs
 };
 
+#[cfg(feature = "async")]
+use crate::asynchronous::SocketAndAddr;
+
 const LEGACY_VERSION: usize = 2;
 const RANDOM: usize = 32;
 const LEGACY_SESSION: usize = 1;
@@ -206,31 +209,21 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
         Ok(&buffer.release_buffer()[..offset])
     }
 
-    fn run_retransmission(
+    fn check_retransmission(
         &mut self,
         now_ms: &TimeStampMs,
-        stage_buffer: &mut [u8],
-        epoch_states: &mut [EpochState],
-        epoch: EpochShort,
-        send_bytes: &mut dyn FnMut(&[u8])
-    ) -> Result<u64, DtlsError>
-    {
-        trace!("Entry: epoch: {}, seq_num: {}, acked: {}",
-            self.epoch, self.seq_num, self.acked
-        );
-
+    ) -> Result<bool, DtlsError> {
         if self.acked {
-            return Ok(0);
+            return Ok(false);
         }
         if self.rt_timestamp_ms > *now_ms {
-            return Ok(self.rt_timestamp_ms);
+            return Ok(false);
         }
         trace!(
             "Retransmitting entry: epoch: {}, last_record_seq_num: {}",
             self.epoch,
             self.seq_num,
         );
-        debug_assert!(epoch >= self.epoch && epoch - self.epoch < 4);
 
         // implementations SHOULD use an initial timer value of 1000 ms and double the value at
         // each retransmission, up to no less than 60 seconds
@@ -239,10 +232,42 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
         if self.rt_count >= 7 {
             return Err(DtlsError::MaximumRetransmissionsReached);
         }
+        Ok(true)
+    }
 
-        let buf = self.send_entry(stage_buffer, epoch_states, epoch)?;
-        send_bytes(buf);
-        Ok(self.rt_timestamp_ms)
+    fn run_retransmission(
+        &mut self,
+        now_ms: &TimeStampMs,
+        stage_buffer: &mut [u8],
+        epoch_states: &mut [EpochState],
+        epoch: EpochShort,
+        send_bytes: &mut dyn FnMut(&[u8]),
+    ) -> Result<u64, DtlsError> {
+        if self.check_retransmission(now_ms)? {
+            let buf = self.send_entry(stage_buffer, epoch_states, epoch)?;
+            send_bytes(buf);
+            Ok(self.rt_timestamp_ms)
+        } else {
+            Ok(0)
+        }
+    }
+
+    #[cfg(feature = "async")]
+    async fn run_retransmission_async<Socket: embedded_nal_async::UnconnectedUdp>(
+        &mut self,
+        now_ms: &TimeStampMs,
+        stage_buffer: &mut [u8],
+        epoch_states: &mut [EpochState],
+        epoch: EpochShort,
+        socket: &mut SocketAndAddr<'_, Socket>,
+    ) -> Result<u64, DtlsError> {
+        if self.check_retransmission(now_ms)? {
+            let buf = self.send_entry(stage_buffer, epoch_states, epoch)?;
+            socket.send(buf).await?;
+            Ok(self.rt_timestamp_ms)
+        } else {
+            Ok(0)
+        }
     }
 
     fn ack(&mut self, ack_epoch: &Epoch, ack_seq_num: &RecordSeqNum) {
@@ -290,6 +315,38 @@ impl NetQueue {
             next_rt_timestamp = next_rt_timestamp.max(resend.sh.run_retransmission(now_ms, staging_buffer, epoch_states, epoch, send_bytes)?);
             next_rt_timestamp = next_rt_timestamp.max(resend.ee.run_retransmission(now_ms, staging_buffer, epoch_states, epoch, send_bytes)?);
             next_rt_timestamp = next_rt_timestamp.max(resend.fin.run_retransmission(now_ms, staging_buffer, epoch_states, epoch, send_bytes)?);
+        }
+        if next_rt_timestamp == 0 {
+            Ok(DtlsPoll::Wait)
+        } else {
+            Ok(DtlsPoll::WaitTimeoutMs((next_rt_timestamp - now_ms) as u32))
+        }
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) async fn run_retransmission_async<Socket: embedded_nal_async::UnconnectedUdp>(
+        &mut self,
+        now_ms: &TimeStampMs,
+        stage_buffer: &mut [u8],
+        epoch_states: &mut [EpochState],
+        epoch: EpochShort,
+        socket: &mut SocketAndAddr<'_, Socket>,
+    ) -> Result<DtlsPoll, DtlsError> {
+        let mut next_rt_timestamp = 0;
+        if let NetQueueState::ClientResend(resend) = &mut self.state {
+            let timestamp_ms = match resend {
+                ClientResend::ClientHello(rt) => {
+                    rt.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?
+                },
+                ClientResend::Finished(rt) => {
+                    rt.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?
+                },
+            };
+            next_rt_timestamp = next_rt_timestamp.max(timestamp_ms);
+        } else if let NetQueueState::ServerResend(resend) = &mut self.state {
+            next_rt_timestamp = next_rt_timestamp.max(resend.sh.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?);
+            next_rt_timestamp = next_rt_timestamp.max(resend.ee.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?);
+            next_rt_timestamp = next_rt_timestamp.max(resend.fin.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?);
         }
         if next_rt_timestamp == 0 {
             Ok(DtlsPoll::Wait)
@@ -366,6 +423,46 @@ impl NetQueue {
         };
         send_bytes(buf);
         Ok(())
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) async fn send_rt_entry_async<Socket: embedded_nal_async::UnconnectedUdp>(
+        &mut self,
+        index: usize,
+        stage_buffer: &mut [u8],
+        epoch_states: &mut [EpochState],
+        epoch: EpochShort,
+        socket: &mut SocketAndAddr<'_, Socket>,
+    ) -> Result<(), DtlsError> {
+        let buf = match &mut self.state {
+            NetQueueState::Empty => {
+                error!("[NetQueue] send_rt_entry: in state Empty");
+                return Err(DtlsError::IllegalInnerState);
+            },
+            NetQueueState::ClientResend(client_resend) => {
+                match client_resend {
+                    ClientResend::ClientHello(rt) => {
+                        rt.send_entry(stage_buffer, epoch_states, epoch)?
+                    },
+                    ClientResend::Finished(rt) => {
+                        rt.send_entry(stage_buffer, epoch_states, epoch)?
+                    },
+                }
+            },
+            NetQueueState::ServerResend(server_resend) => {
+                match index {
+                    0 => server_resend.sh.send_entry(stage_buffer, epoch_states, epoch)?,
+                    1 => server_resend.ee.send_entry(stage_buffer, epoch_states, epoch)?,
+                    2 => server_resend.fin.send_entry(stage_buffer, epoch_states, epoch)?,
+                    _ => {
+                        error!("[NetQueue] send_rt_entry: invalid index {}", index);
+                        return Err(DtlsError::IllegalInnerState);
+                    },
+                }
+            },
+            NetQueueState::ClientReorder(_) => { return Ok(()) },
+        };
+        socket.send(buf).await
     }
 
     pub fn store_cookie(&mut self, cookie: &[u8]) -> Result<(), DtlsError> {

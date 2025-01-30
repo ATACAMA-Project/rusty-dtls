@@ -129,7 +129,7 @@ async fn run_handshake_async(
 ) {
     use rusty_dtls::DtlsStackAsync;
 
-    let mut buffer = [0; 1024];
+    let mut net_queue = NetQueue::new();
     let mut staging_buffer = [0; 256];
     let mut rand = rand::thread_rng();
     let psks = [Psk::new(&[123], &[1, 2, 3, 4, 5], HashFunction::Sha256)];
@@ -157,9 +157,9 @@ async fn run_handshake_async(
     .unwrap();
     let mut handshakes = Vec::new();
     if server {
-        handshakes.push(HandshakeSlot::new(&psks, &mut buffer));
+        handshakes.push(HandshakeSlot::new(&psks, &mut net_queue));
     } else {
-        handshakes.push(HandshakeSlot::new(&psks, &mut buffer));
+        handshakes.push(HandshakeSlot::new(&psks, &mut net_queue));
         assert!(stack.open_connection(
             &mut handshakes[0],
             &format!("127.0.0.1:{}", peer_port).parse().unwrap()
