@@ -47,10 +47,9 @@ impl<'a> EntryIterator<'a> {
                     continue;
                 }
                 if &rt.rt_timestamp_ms <= self.now_ms {
-                    trace!(
-                        "Retransmitting entry: epoch: {}, last_record_seq_num: {}",
-                        rt.epoch,
-                        rt.seq_num,
+                    debug!(
+                        "Retransmitting record: epoch: {}, last sent with record_seq_num: {}",
+                        rt.epoch, rt.seq_num,
                     );
                     rt.tick_rt_count(self.now_ms)?;
                     self.next_rt_timestamp = self.next_rt_timestamp.min(rt.rt_timestamp_ms);
@@ -90,7 +89,6 @@ impl<'a> BufferMessageQueue<'a> {
         epoch: EpochShort,
         send_bytes: &mut dyn FnMut(&[u8]),
     ) -> Result<DtlsPoll, DtlsError> {
-        trace!("Running retransmission");
         let mut iter = EntryIterator::new(self.message_queue.iter_mut(), now_ms);
         while let Some(rt) = iter.try_next()? {
             let buf = send_entry(self.buffer, rt, stage_buffer, epoch_states, epoch)?;
@@ -108,7 +106,6 @@ impl<'a> BufferMessageQueue<'a> {
         epoch: EpochShort,
         socket: &mut SocketAndAddr<'_, Socket>,
     ) -> Result<DtlsPoll, DtlsError> {
-        trace!("Running retransmission");
         let mut iter = EntryIterator::new(self.message_queue.iter_mut(), now_ms);
         while let Some(rt) = iter.try_next()? {
             let buf = send_entry(self.buffer, rt, stage_buffer, epoch_states, epoch)?;

@@ -1,6 +1,6 @@
 use core::panic;
 
-use log::trace;
+use log::{debug, trace};
 
 use crate::crypto::{PskTranscriptHash, TrafficSecret};
 use crate::parsing::{
@@ -96,7 +96,7 @@ impl CryptoInformation {
 
 impl<'a> HandshakeInformation<'a> {
     pub fn client_switch_to_post_hello_retry_hash(&mut self) {
-        trace!("[Client] switch to post hello retry hash");
+        trace!("[Client] Switch to post hello_retry hash");
         let crypto = core::mem::replace(&mut self.crypto, CryptoInformation::None);
         if let (Some(cipher_suite), CryptoInformation::PreServerHello(hashes)) =
             (self.selected_cipher_suite, crypto)
@@ -121,7 +121,7 @@ impl<'a> HandshakeInformation<'a> {
     }
 
     pub fn server_init_post_hello_retry_hash(&mut self, cookie: &[u8]) {
-        trace!("[Server] init post hello retry hash");
+        trace!("[Server] Init post hello_retry hash");
         let Some(cipher_suite) = self.selected_cipher_suite else {
             panic!("Illegal inner state");
         };
@@ -235,7 +235,7 @@ pub fn process_client(
     let mut send_task = None;
     let poll = match state {
         ClientState::Start => {
-            trace!("[Client] Send client_hello");
+            debug!("[Client] Send client_hello");
             record_queue.clear_record_queue();
             let entry = alloc_client_hello(ctx, record_queue, rng, now_ms)?;
             send_task = Some(SendTask::new(entry, 0));
@@ -243,7 +243,7 @@ pub fn process_client(
             DtlsPoll::Wait
         }
         ClientState::ReceivedHelloRetry => {
-            trace!("[Client] Send updated client_hello");
+            debug!("[Client] Send updated client_hello");
             let entry = alloc_client_hello(ctx, record_queue, rng, now_ms)?;
             send_task = Some(SendTask::new(entry, 0));
             *state = ClientState::WaitServerHello;
@@ -262,7 +262,7 @@ pub fn process_client(
             record_queue.clear_record_queue();
             ctx.info
                 .advance_to_epoch_three(conn, "s ap traffic", "c ap traffic")?;
-            trace!("[Client] Send finished");
+            debug!("[Client] Send finished");
             let entry = alloc_client_finish(ctx, record_queue, conn, now_ms)?;
             send_task = Some(SendTask::new(entry, 2));
             *state = ClientState::WaitServerAck;
@@ -411,7 +411,7 @@ fn try_unpack_handshake_message<'b>(
     if seq_num != expected_seq_num as u16 {
         let message = handshake.abort_parsing();
         if seq_num > expected_seq_num as u16 {
-            trace!(
+            debug!(
                 "Saving handshake message to record_queue with too new handshake_seq_num: {}",
                 seq_num
             );
@@ -425,7 +425,7 @@ fn try_unpack_handshake_message<'b>(
                 Err(err) => Err(err),
             }
         } else {
-            trace!(
+            debug!(
                 "Dropped handshake message with too old handshake_seq_num: {}",
                 seq_num
             );
@@ -446,7 +446,7 @@ fn receive_client(
     match state {
         ClientState::WaitServerHello => {
             assert_handshake_type(handshake_type, HandshakeType::ServerHello)?;
-            trace!("[Client] Received server_hello");
+            debug!("[Client] Received server_hello");
             let server_hello_variant = Some(parse_server_hello(
                 message.payload_buffer(),
                 CipherSuite::all(),
@@ -467,14 +467,14 @@ fn receive_client(
         }
         ClientState::WaitEncryptedExtensions => {
             assert_handshake_type(handshake_type, HandshakeType::EncryptedExtension)?;
-            trace!("[Client] Received encrypted_extensions");
+            debug!("[Client] Received encrypted_extensions");
             parse_encrypted_extensions(message.payload_buffer())?;
             message.add_to_transcript_hash(&mut info.crypto);
             *state = ClientState::WaitFinished;
         }
         ClientState::WaitFinished => {
             assert_handshake_type(handshake_type, HandshakeType::Finished)?;
-            trace!("[Client] Received finished");
+            debug!("[Client] Received finished");
             parse_finished(
                 message.payload_buffer(),
                 &conn.epochs[conn.current_epoch as usize & 3].read_traffic_secret,
@@ -516,7 +516,7 @@ pub fn process_server(
     let mut send = false;
     let poll = match state {
         ServerState::RecvdClientHello => {
-            trace!("[Server] Send server_hello");
+            debug!("[Server] Send server_hello");
             record_queue.clear_record_queue();
             let seq_num = ctx.next_send_seq_num();
             record_queue.alloc_rt_entry(0, now_ms, &mut |buffer| {
@@ -537,7 +537,7 @@ pub fn process_server(
             ctx.info
                 .advance_to_epoch_two(conn, "c hs traffic", "s hs traffic")?;
 
-            trace!("[Server] Send encrypted_extensions");
+            debug!("[Server] Send encrypted_extensions");
             let seq_num = ctx.next_send_seq_num();
             record_queue.alloc_rt_entry(2, now_ms, &mut |buffer| {
                 let mut handshake = EncodeHandshakeMessage::new(
@@ -549,7 +549,7 @@ pub fn process_server(
                 handshake.finish(&mut ctx.info.crypto);
                 Ok(())
             })?;
-            trace!("[Server] Send finished");
+            debug!("[Server] Send finished");
             let seq_num = ctx.next_send_seq_num();
             record_queue.alloc_rt_entry(2, now_ms, &mut |buffer| {
                 let epoch_state = &mut conn.epochs[(conn.current_epoch as usize) & 3];
@@ -605,7 +605,7 @@ fn receive_server(
     match state {
         ServerState::WaitFinished => {
             assert_handshake_type(handshake_type, HandshakeType::Finished)?;
-            trace!("[Server] Received finished");
+            debug!("[Server] Received finished");
             parse_finished(
                 message.payload_buffer(),
                 &conn.epochs[2].read_traffic_secret,

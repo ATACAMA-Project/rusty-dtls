@@ -17,7 +17,7 @@ use aes_gcm::{
 };
 use hkdf::hmac::Mac;
 use hkdf::{hmac::SimpleHmac, Hkdf};
-use log::{debug, trace};
+use log::trace;
 use sha2::digest::Update;
 use sha2::{
     digest::{generic_array::GenericArray, FixedOutput, OutputSizeUser},
@@ -533,7 +533,7 @@ fn hkdf_expand_label(
     okm: &mut [u8],
 ) -> Result<(), DtlsError> {
     let okm_len = okm.len() as u16;
-    debug!("Hkdf_expand_label: {:?}, OKM_length: {}", label, okm_len);
+    trace!("Hkdf_expand_label: {:?}", label);
     let label_len = 6 + label.len() as u8;
     hkdf.hkdf_expand(
         &[
@@ -611,7 +611,7 @@ pub fn validate_binder(
     psk: &Psk,
     transcript_hash: &[u8],
 ) -> Result<bool, DtlsError> {
-    debug!("Validating binder");
+    trace!("Validating binder entry");
     print_bytes!("received_binder", received_binder);
     print_bytes!("transcript_hash", transcript_hash);
     let valid = match psk.hash_function {
@@ -628,7 +628,7 @@ pub fn encode_binder_entry(
     psk: &Psk,
     transcript_hash: &[u8],
 ) -> Result<(), DtlsError> {
-    debug!("Encode binder");
+    trace!("Encode binder entry");
     print_bytes!("transcript_hash", transcript_hash);
     let binder: &[u8] = match psk.hash_function {
         #[cfg(feature = "aes128gcm_sha256")]

@@ -11,6 +11,7 @@ use rusty_dtls::{HandshakeSlot, HashFunction, Psk};
 
 #[cfg(not(feature = "async"))]
 use {
+    log::debug,
     rusty_dtls::{ConnectionId, DtlsPoll, DtlsStack},
     std::{cell::Cell, ops::Range, time::Instant},
 };
@@ -84,7 +85,6 @@ impl Proxy {
                 } else {
                     self.client
                 };
-                println!("RECEIVED");
 
                 match action {
                     Some(Action::Drop) => {
@@ -100,7 +100,6 @@ impl Proxy {
                     }
                     _ => {}
                 }
-                println!("SENT");
                 self.socket.send_to(&buffer[..read], recv_addr).unwrap();
             }
         });
@@ -144,7 +143,6 @@ async fn run_handshake_async(
         ))
         .await
         .unwrap();
-    println!("{addr:?}");
 
     let mut stack = DtlsStackAsync::<'_, _, _, _, 10>::new(
         &mut rand,
@@ -200,7 +198,7 @@ async fn run_handshake_async(
 fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_data: bool) {
     let socket = Mutex::new(UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], own_port))).unwrap());
     let mut send_to_peer = |addr: &SocketAddr, buf: &[u8]| {
-        info!("[{own_port}] Send message. Size: {}", buf.len());
+        debug!("[{own_port}] Send message. Size: {}", buf.len());
         socket.lock().unwrap().send_to(buf, addr).unwrap();
     };
     let got_app_data = Cell::new(false);
@@ -238,7 +236,7 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
         let poll = poll.unwrap();
         match poll {
             DtlsPoll::WaitTimeoutMs(ms) => {
-                info!("[{own_port}] Wait {ms}");
+                debug!("[{own_port}] Wait {ms}");
                 socket
                     .lock()
                     .unwrap()
@@ -246,7 +244,7 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
                     .unwrap();
             }
             DtlsPoll::Wait => {
-                info!("[{own_port}] Wait");
+                debug!("[{own_port}] Wait");
                 socket.lock().unwrap().set_read_timeout(None).unwrap();
             }
             DtlsPoll::FinishedHandshake => {
@@ -327,7 +325,7 @@ fn handshake_test(proxy: Proxy, send_app_data: bool, timeout_milis: u64) {
 #[cfg(not(feature = "async"))]
 fn handshake_test(proxy: Proxy, send_app_data: bool, timeout_milis: u64) {
     let _ = simple_logger::SimpleLogger::new()
-        // .with_level(log::LevelFilter::Info)
+        .with_level(log::LevelFilter::Debug)
         .init();
     let proxy = proxy.run();
     let s = run_server(send_app_data);
