@@ -345,8 +345,13 @@ pub fn handle_handshake_message_client(
             Ok(())
         },
     )?;
+    if matches!(
+        *state,
+        ClientState::ReceivedHelloRetry | ClientState::WaitEncryptedExtensions
+    ) {
+        record_queue.clear_retransmission();
+    }
     if let Some(cookie) = cookie {
-        record_queue.clear_record_queue();
         record_queue
             .store_cookie(&buf.complete_inner_buffer()[cookie.index..cookie.index + cookie.len])?;
     }
@@ -377,7 +382,7 @@ fn handle_handshake_message(
             let (handshake, handshake_type, _) = ParseHandshakeMessage::new(message)?;
             handle(&mut ctx.info, handshake_type, handshake)?;
             ctx.recv_handshake_seq_num += 1;
-            record_queue.free_entry(msg);
+            record_queue.free_entry_by_index(msg);
             continue;
         }
         break;
@@ -483,7 +488,7 @@ fn receive_client(
             message.add_to_transcript_hash(&mut info.crypto);
             *state = ClientState::SendFinished;
         }
-        _ => todo!(),
+        _ => return Err(DtlsError::IllegalInnerState),
     }
     Ok(None)
 }
@@ -592,7 +597,11 @@ pub fn handle_handshake_message_server(
         &mut |info, handshake_type, handshake| {
             receive_server(state, info, conn, handshake_type, handshake)
         },
-    )
+    )?;
+    if matches!(*state, ServerState::FinishedHandshake) {
+        record_queue.clear_retransmission();
+    }
+    Ok(())
 }
 
 fn receive_server(
@@ -614,7 +623,7 @@ fn receive_server(
             *state = ServerState::FinishedHandshake;
             message.add_to_transcript_hash(&mut info.crypto);
         }
-        _ => todo!(),
+        _ => return Err(DtlsError::IllegalInnerState),
     }
     Ok(())
 }

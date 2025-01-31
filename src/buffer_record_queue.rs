@@ -239,12 +239,16 @@ impl<'a> BufferMessageQueue<'a> {
         Ok(ParseBuffer::init(record_data.to_slice(self.buffer)))
     }
 
-    pub fn free_entry(&mut self, index: usize) {
+    pub fn free_entry_by_index(&mut self, index: usize) {
         let Some(entry) = self.message_queue.iter_mut().nth(index) else {
             warn!("Used invalid index!");
             return;
         };
         let entry = entry.take();
+        self.free_entry(&entry);
+    }
+
+    fn free_entry(&mut self, entry: &Entry) {
         self.free_data(entry.record_data_raw());
         self.clean_entries();
     }
@@ -294,6 +298,18 @@ impl<'a> BufferMessageQueue<'a> {
     pub fn clear_record_queue(&mut self) {
         self.message_queue.clear();
         self.buffer_pos = 0;
+    }
+
+    pub fn clear_retransmission(&mut self) {
+        let mut i = 0usize;
+        while i < self.message_queue.len() {
+            let entry = self.message_queue.iter_mut().nth(i).unwrap();
+            if matches!(entry, Entry::Retransmission(_)) {
+                let entry = &entry.take();
+                self.free_entry(entry);
+            }
+            i += 1;
+        }
     }
 
     pub fn reset(&mut self) {
