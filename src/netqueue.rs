@@ -3,7 +3,7 @@ use log::{error, info, trace};
 use crate::{
     parsing::ParseBuffer,
     record_parsing::{EncodeCiphertextRecord, EncodePlaintextRecord, RecordContentType},
-    DtlsError, DtlsPoll, Epoch, EpochShort, EpochState, HandshakeSeqNum, RecordSeqNum, TimeStampMs
+    DtlsError, DtlsPoll, Epoch, EpochShort, EpochState, HandshakeSeqNum, RecordSeqNum, TimeStampMs,
 };
 
 #[cfg(feature = "async")]
@@ -53,7 +53,10 @@ pub struct Cookie {
 
 impl Default for Cookie {
     fn default() -> Self {
-        Self { len: 0, data: [0u8; COOKIE] }
+        Self {
+            len: 0,
+            data: [0u8; COOKIE],
+        }
     }
 }
 
@@ -112,7 +115,9 @@ impl HandshakeHeader for ServerHello {
 
 impl core::default::Default for ServerHello {
     fn default() -> Self {
-        Self { data: [0; HS_HDR_LEN + SERVER_HELLO_LEN] }
+        Self {
+            data: [0; HS_HDR_LEN + SERVER_HELLO_LEN],
+        }
     }
 }
 
@@ -160,12 +165,13 @@ impl HandshakeHeader for Finished {
 
 impl Default for Finished {
     fn default() -> Self {
-        Self { data: [0u8; HS_HDR_LEN + 32 + 5] }
+        Self {
+            data: [0u8; HS_HDR_LEN + 32 + 5],
+        }
     }
 }
 
 impl<T: Default + HandshakeHeader> Retransmission<T> {
-
     fn init(&mut self, epoch: EpochShort, now_ms: &TimeStampMs) {
         self.rt_timestamp_ms = *now_ms + 1000;
         self.rt_count = 0;
@@ -192,7 +198,9 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
             let mut record =
                 EncodeCiphertextRecord::new(&mut buffer, epoch_state, &(self.epoch as u64))?;
             record.payload_buffer().expect_length(self.msg.len())?;
-            record.payload_buffer().write_into(&message_buffer[..self.msg.len()]);
+            record
+                .payload_buffer()
+                .write_into(&message_buffer[..self.msg.len()]);
             record.finish(epoch_state, RecordContentType::DtlsHandshake)?;
         } else {
             let mut record = EncodePlaintextRecord::new(
@@ -201,7 +209,9 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
                 epoch_state.send_record_seq_num,
             )?;
             record.payload_buffer().expect_length(self.msg.len())?;
-            record.payload_buffer().write_into(&message_buffer[..self.msg.len()]);
+            record
+                .payload_buffer()
+                .write_into(&message_buffer[..self.msg.len()]);
             record.finish();
             epoch_state.send_record_seq_num += 1;
         }
@@ -209,10 +219,7 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
         Ok(&buffer.release_buffer()[..offset])
     }
 
-    fn check_retransmission(
-        &mut self,
-        now_ms: &TimeStampMs,
-    ) -> Result<bool, DtlsError> {
+    fn check_retransmission(&mut self, now_ms: &TimeStampMs) -> Result<bool, DtlsError> {
         if self.acked {
             return Ok(false);
         }
@@ -288,7 +295,9 @@ type EncodeData<'a> = &'a mut dyn FnMut(&mut ParseBuffer<&mut [u8]>) -> Result<(
 
 impl NetQueue {
     pub fn new() -> Self {
-        NetQueue { state: NetQueueState::Empty }
+        NetQueue {
+            state: NetQueueState::Empty,
+        }
     }
 
     pub(crate) fn run_retransmission(
@@ -298,23 +307,40 @@ impl NetQueue {
         epoch_states: &mut [EpochState],
         epoch: EpochShort,
         send_bytes: &mut dyn FnMut(&[u8]),
-    ) -> Result<DtlsPoll, DtlsError>
-    {
+    ) -> Result<DtlsPoll, DtlsError> {
         let mut next_rt_timestamp = 0;
         if let NetQueueState::ClientResend(resend) = &mut self.state {
             let timestamp_ms = match resend {
                 ClientResend::ClientHello(rt) => {
                     rt.run_retransmission(now_ms, staging_buffer, epoch_states, epoch, send_bytes)?
-                },
+                }
                 ClientResend::Finished(rt) => {
                     rt.run_retransmission(now_ms, staging_buffer, epoch_states, epoch, send_bytes)?
-                },
+                }
             };
             next_rt_timestamp = next_rt_timestamp.max(timestamp_ms);
         } else if let NetQueueState::ServerResend(resend) = &mut self.state {
-            next_rt_timestamp = next_rt_timestamp.max(resend.sh.run_retransmission(now_ms, staging_buffer, epoch_states, epoch, send_bytes)?);
-            next_rt_timestamp = next_rt_timestamp.max(resend.ee.run_retransmission(now_ms, staging_buffer, epoch_states, epoch, send_bytes)?);
-            next_rt_timestamp = next_rt_timestamp.max(resend.fin.run_retransmission(now_ms, staging_buffer, epoch_states, epoch, send_bytes)?);
+            next_rt_timestamp = next_rt_timestamp.max(resend.sh.run_retransmission(
+                now_ms,
+                staging_buffer,
+                epoch_states,
+                epoch,
+                send_bytes,
+            )?);
+            next_rt_timestamp = next_rt_timestamp.max(resend.ee.run_retransmission(
+                now_ms,
+                staging_buffer,
+                epoch_states,
+                epoch,
+                send_bytes,
+            )?);
+            next_rt_timestamp = next_rt_timestamp.max(resend.fin.run_retransmission(
+                now_ms,
+                staging_buffer,
+                epoch_states,
+                epoch,
+                send_bytes,
+            )?);
         }
         if next_rt_timestamp == 0 {
             Ok(DtlsPoll::Wait)
@@ -336,17 +362,34 @@ impl NetQueue {
         if let NetQueueState::ClientResend(resend) = &mut self.state {
             let timestamp_ms = match resend {
                 ClientResend::ClientHello(rt) => {
-                    rt.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?
-                },
+                    rt.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket)
+                        .await?
+                }
                 ClientResend::Finished(rt) => {
-                    rt.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?
-                },
+                    rt.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket)
+                        .await?
+                }
             };
             next_rt_timestamp = next_rt_timestamp.max(timestamp_ms);
         } else if let NetQueueState::ServerResend(resend) = &mut self.state {
-            next_rt_timestamp = next_rt_timestamp.max(resend.sh.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?);
-            next_rt_timestamp = next_rt_timestamp.max(resend.ee.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?);
-            next_rt_timestamp = next_rt_timestamp.max(resend.fin.run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket).await?);
+            next_rt_timestamp = next_rt_timestamp.max(
+                resend
+                    .sh
+                    .run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket)
+                    .await?,
+            );
+            next_rt_timestamp = next_rt_timestamp.max(
+                resend
+                    .ee
+                    .run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket)
+                    .await?,
+            );
+            next_rt_timestamp = next_rt_timestamp.max(
+                resend
+                    .fin
+                    .run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket)
+                    .await?,
+            );
         }
         if next_rt_timestamp == 0 {
             Ok(DtlsPoll::Wait)
@@ -357,13 +400,17 @@ impl NetQueue {
 
     pub fn ack(&mut self, ack_epoch: &u64, ack_seq_num: &u64) {
         match &mut self.state {
-            NetQueueState::ClientResend(ClientResend::ClientHello(rt)) => rt.ack(ack_epoch, ack_seq_num),
-            NetQueueState::ClientResend(ClientResend::Finished(rt)) => rt.ack(ack_epoch, ack_seq_num),
+            NetQueueState::ClientResend(ClientResend::ClientHello(rt)) => {
+                rt.ack(ack_epoch, ack_seq_num)
+            }
+            NetQueueState::ClientResend(ClientResend::Finished(rt)) => {
+                rt.ack(ack_epoch, ack_seq_num)
+            }
             NetQueueState::ServerResend(server_resend) => {
                 server_resend.sh.ack(ack_epoch, ack_seq_num);
                 server_resend.ee.ack(ack_epoch, ack_seq_num);
                 server_resend.fin.ack(ack_epoch, ack_seq_num);
-            },
+            }
             _ => (),
         }
     }
@@ -376,7 +423,7 @@ impl NetQueue {
                 server_resend.sh.schedule();
                 server_resend.ee.schedule();
                 server_resend.fin.schedule();
-            },
+            }
             _ => (),
         }
     }
@@ -397,29 +444,29 @@ impl NetQueue {
             NetQueueState::Empty => {
                 error!("[NetQueue] send_rt_entry: in state Empty");
                 return Err(DtlsError::IllegalInnerState);
+            }
+            NetQueueState::ClientResend(client_resend) => match client_resend {
+                ClientResend::ClientHello(rt) => {
+                    rt.send_entry(stage_buffer, epoch_states, epoch)?
+                }
+                ClientResend::Finished(rt) => rt.send_entry(stage_buffer, epoch_states, epoch)?,
             },
-            NetQueueState::ClientResend(client_resend) => {
-                match client_resend {
-                    ClientResend::ClientHello(rt) => {
-                        rt.send_entry(stage_buffer, epoch_states, epoch)?
-                    },
-                    ClientResend::Finished(rt) => {
-                        rt.send_entry(stage_buffer, epoch_states, epoch)?
-                    },
+            NetQueueState::ServerResend(server_resend) => match index {
+                0 => server_resend
+                    .sh
+                    .send_entry(stage_buffer, epoch_states, epoch)?,
+                1 => server_resend
+                    .ee
+                    .send_entry(stage_buffer, epoch_states, epoch)?,
+                2 => server_resend
+                    .fin
+                    .send_entry(stage_buffer, epoch_states, epoch)?,
+                _ => {
+                    error!("[NetQueue] send_rt_entry: invalid index {}", index);
+                    return Err(DtlsError::IllegalInnerState);
                 }
             },
-            NetQueueState::ServerResend(server_resend) => {
-                match index {
-                    0 => server_resend.sh.send_entry(stage_buffer, epoch_states, epoch)?,
-                    1 => server_resend.ee.send_entry(stage_buffer, epoch_states, epoch)?,
-                    2 => server_resend.fin.send_entry(stage_buffer, epoch_states, epoch)?,
-                    _ => {
-                        error!("[NetQueue] send_rt_entry: invalid index {}", index);
-                        return Err(DtlsError::IllegalInnerState);
-                    },
-                }
-            },
-            NetQueueState::ClientReorder(_) => { return Ok(()) },
+            NetQueueState::ClientReorder(_) => return Ok(()),
         };
         send_bytes(buf);
         Ok(())
@@ -438,35 +485,35 @@ impl NetQueue {
             NetQueueState::Empty => {
                 error!("[NetQueue] send_rt_entry: in state Empty");
                 return Err(DtlsError::IllegalInnerState);
+            }
+            NetQueueState::ClientResend(client_resend) => match client_resend {
+                ClientResend::ClientHello(rt) => {
+                    rt.send_entry(stage_buffer, epoch_states, epoch)?
+                }
+                ClientResend::Finished(rt) => rt.send_entry(stage_buffer, epoch_states, epoch)?,
             },
-            NetQueueState::ClientResend(client_resend) => {
-                match client_resend {
-                    ClientResend::ClientHello(rt) => {
-                        rt.send_entry(stage_buffer, epoch_states, epoch)?
-                    },
-                    ClientResend::Finished(rt) => {
-                        rt.send_entry(stage_buffer, epoch_states, epoch)?
-                    },
+            NetQueueState::ServerResend(server_resend) => match index {
+                0 => server_resend
+                    .sh
+                    .send_entry(stage_buffer, epoch_states, epoch)?,
+                1 => server_resend
+                    .ee
+                    .send_entry(stage_buffer, epoch_states, epoch)?,
+                2 => server_resend
+                    .fin
+                    .send_entry(stage_buffer, epoch_states, epoch)?,
+                _ => {
+                    error!("[NetQueue] send_rt_entry: invalid index {}", index);
+                    return Err(DtlsError::IllegalInnerState);
                 }
             },
-            NetQueueState::ServerResend(server_resend) => {
-                match index {
-                    0 => server_resend.sh.send_entry(stage_buffer, epoch_states, epoch)?,
-                    1 => server_resend.ee.send_entry(stage_buffer, epoch_states, epoch)?,
-                    2 => server_resend.fin.send_entry(stage_buffer, epoch_states, epoch)?,
-                    _ => {
-                        error!("[NetQueue] send_rt_entry: invalid index {}", index);
-                        return Err(DtlsError::IllegalInnerState);
-                    },
-                }
-            },
-            NetQueueState::ClientReorder(_) => { return Ok(()) },
+            NetQueueState::ClientReorder(_) => return Ok(()),
         };
         socket.send(buf).await
     }
 
     pub fn store_cookie(&mut self, cookie: &[u8]) -> Result<(), DtlsError> {
-        let NetQueueState::ClientResend(ClientResend::ClientHello(rt)) = &mut self.state else { 
+        let NetQueueState::ClientResend(ClientResend::ClientHello(rt)) = &mut self.state else {
             error!("[NetQueue] in not in state ClientResend ClientHello");
             return Err(DtlsError::IllegalInnerState);
         };
@@ -488,7 +535,7 @@ impl NetQueue {
             Option<&[u8]>,
         ) -> Result<(), DtlsError>,
     ) -> Result<(), DtlsError> {
-        let NetQueueState::ClientResend(ClientResend::ClientHello(rt)) = &mut self.state else { 
+        let NetQueueState::ClientResend(ClientResend::ClientHello(rt)) = &mut self.state else {
             error!("[NetQueue] in not in state ClientResend ClientHello");
             return Err(DtlsError::IllegalInnerState);
         };
@@ -502,9 +549,7 @@ impl NetQueue {
             cookie_buffer = Some(&rt.msg.cookie.data[..cookie_len]);
         }
 
-        alloc_data(buffer, &mut |b| {
-            encode_data(b, cookie_buffer)
-        })?;
+        alloc_data(buffer, &mut |b| encode_data(b, cookie_buffer))?;
         Ok(())
     }
 
@@ -514,7 +559,7 @@ impl NetQueue {
         now_ms: &TimeStampMs,
         encode_data: EncodeData,
     ) -> Result<(), DtlsError> {
-        let NetQueueState::ClientResend(ClientResend::Finished(rt)) = &mut self.state else { 
+        let NetQueueState::ClientResend(ClientResend::Finished(rt)) = &mut self.state else {
             error!("[NetQueue] in not in state ClientResend Finished");
             return Err(DtlsError::IllegalInnerState);
         };
@@ -531,7 +576,7 @@ impl NetQueue {
         handshake_seq_num: HandshakeSeqNum,
         encode_data: EncodeData,
     ) -> Result<(), DtlsError> {
-        let NetQueueState::ClientReorder(option) = &mut self.state else { 
+        let NetQueueState::ClientReorder(option) = &mut self.state else {
             error!("[NetQueue] in not in state ClientReorder");
             return Err(DtlsError::IllegalInnerState);
         };
@@ -543,7 +588,9 @@ impl NetQueue {
         // FIXME: handshake_seq_num
 
         self.state = NetQueueState::ClientReorder(Some(Finished::default()));
-        let NetQueueState::ClientReorder(Some(fin)) = &mut self.state else { unreachable!() };
+        let NetQueueState::ClientReorder(Some(fin)) = &mut self.state else {
+            unreachable!()
+        };
 
         let buffer = &mut fin.data;
         alloc_data(buffer, encode_data)?;
@@ -556,7 +603,7 @@ impl NetQueue {
         now_ms: &TimeStampMs,
         encode_data: EncodeData,
     ) -> Result<usize, DtlsError> {
-        let NetQueueState::ServerResend(resend) = &mut self.state else { 
+        let NetQueueState::ServerResend(resend) = &mut self.state else {
             error!("[NetQueue] in not in state ServerResend");
             return Err(DtlsError::IllegalInnerState);
         };
@@ -572,7 +619,7 @@ impl NetQueue {
         now_ms: &TimeStampMs,
         encode_data: EncodeData,
     ) -> Result<usize, DtlsError> {
-        let NetQueueState::ServerResend(resend) = &mut self.state else { 
+        let NetQueueState::ServerResend(resend) = &mut self.state else {
             error!("[NetQueue] in not in state ServerResend");
             return Err(DtlsError::IllegalInnerState);
         };
@@ -588,7 +635,7 @@ impl NetQueue {
         now_ms: &TimeStampMs,
         encode_data: EncodeData,
     ) -> Result<usize, DtlsError> {
-        let NetQueueState::ServerResend(resend) = &mut self.state else { 
+        let NetQueueState::ServerResend(resend) = &mut self.state else {
             error!("[NetQueue] in not in state ServerResend");
             return Err(DtlsError::IllegalInnerState);
         };
@@ -597,13 +644,9 @@ impl NetQueue {
         alloc_data(buffer, encode_data)?;
         Ok(2)
     }
-
 }
 
-fn alloc_data(
-    buffer: &mut [u8],
-    encode_data: EncodeData,
-) -> Result<usize, DtlsError> {
+fn alloc_data(buffer: &mut [u8], encode_data: EncodeData) -> Result<usize, DtlsError> {
     let mut space = ParseBuffer::init(buffer);
     encode_data(&mut space)?;
     let len = space.offset();

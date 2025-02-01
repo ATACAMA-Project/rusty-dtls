@@ -1,6 +1,6 @@
 use core::panic;
 
-use log::trace;
+use log::{debug, trace};
 
 use crate::crypto::{PskTranscriptHash, TrafficSecret};
 use crate::netqueue::{ClientResend, HandshakeHeader, NetQueue, NetQueueState, ServerResend};
@@ -97,7 +97,7 @@ impl CryptoInformation {
 
 impl<'a> HandshakeInformation<'a> {
     pub fn client_switch_to_post_hello_retry_hash(&mut self) {
-        trace!("[Client] switch to post hello retry hash");
+        trace!("[Client] Switch to post hello_retry hash");
         let crypto = core::mem::replace(&mut self.crypto, CryptoInformation::None);
         if let (Some(cipher_suite), CryptoInformation::PreServerHello(hashes)) =
             (self.selected_cipher_suite, crypto)
@@ -122,7 +122,7 @@ impl<'a> HandshakeInformation<'a> {
     }
 
     pub fn server_init_post_hello_retry_hash(&mut self, cookie: &[u8]) {
-        trace!("[Server] init post hello retry hash");
+        trace!("[Server] Init post hello_retry hash");
         let Some(cipher_suite) = self.selected_cipher_suite else {
             panic!("Illegal inner state");
         };
@@ -236,15 +236,16 @@ pub fn process_client(
     let mut send_task = None;
     let poll = match state {
         ClientState::Start => {
-            trace!("[Client] Send client_hello");
-            net_queue.state = NetQueueState::ClientResend(ClientResend::ClientHello(Default::default()));
+            debug!("[Client] Send client_hello");
+            net_queue.state =
+                NetQueueState::ClientResend(ClientResend::ClientHello(Default::default()));
             alloc_client_hello(ctx, net_queue, rng, now_ms)?;
             send_task = Some(SendTask::new(0, 0));
             *state = ClientState::WaitServerHello;
             DtlsPoll::Wait
         }
         ClientState::ReceivedHelloRetry => {
-            trace!("[Client] Send updated client_hello");
+            debug!("[Client] Send updated client_hello");
             alloc_client_hello(ctx, net_queue, rng, now_ms)?;
             send_task = Some(SendTask::new(0, 0));
             *state = ClientState::WaitServerHello;
@@ -260,10 +261,11 @@ pub fn process_client(
         ClientState::WaitEncryptedExtensions => DtlsPoll::Wait,
         ClientState::WaitFinished => DtlsPoll::Wait,
         ClientState::SendFinished => {
-            net_queue.state = NetQueueState::ClientResend(ClientResend::Finished(Default::default()));
+            net_queue.state =
+                NetQueueState::ClientResend(ClientResend::Finished(Default::default()));
             ctx.info
                 .advance_to_epoch_three(conn, "s ap traffic", "c ap traffic")?;
-            trace!("[Client] Send finished");
+            debug!("[Client] Send finished");
             alloc_client_finish(ctx, net_queue, conn, now_ms)?;
             send_task = Some(SendTask::new(0, 2));
             *state = ClientState::WaitServerAck;
@@ -282,28 +284,27 @@ fn alloc_client_hello(
     now_ms: &TimeStampMs,
 ) -> Result<(), DtlsError> {
     let seq_num = ctx.next_send_seq_num();
-    net_queue
-        .alloc_client_hello_with_cookie(0, now_ms, &mut |buffer, cookie| {
-            let mut handshake =
-                EncodeHandshakeMessage::new(buffer, HandshakeType::ClientHello, seq_num)?;
-            let (_, binders_len) = encode_client_hello(
-                handshake.payload_buffer(),
-                &mut ctx.info,
-                CipherSuite::all(),
-                now_ms,
-                rng,
-                cookie,
-            )?;
-            handshake.partial_transcript_hash(binders_len, &mut ctx.info.crypto);
-            encode_pre_shared_key_client_binders(
-                &mut handshake.binders_buffer(),
-                ctx.info.selected_cipher_suite,
-                ctx.info.available_psks,
-                &mut ctx.info.crypto,
-            )?;
-            handshake.finish_partial_transcript_hash(&mut ctx.info.crypto);
-            Ok(())
-        })
+    net_queue.alloc_client_hello_with_cookie(0, now_ms, &mut |buffer, cookie| {
+        let mut handshake =
+            EncodeHandshakeMessage::new(buffer, HandshakeType::ClientHello, seq_num)?;
+        let (_, binders_len) = encode_client_hello(
+            handshake.payload_buffer(),
+            &mut ctx.info,
+            CipherSuite::all(),
+            now_ms,
+            rng,
+            cookie,
+        )?;
+        handshake.partial_transcript_hash(binders_len, &mut ctx.info.crypto);
+        encode_pre_shared_key_client_binders(
+            &mut handshake.binders_buffer(),
+            ctx.info.selected_cipher_suite,
+            ctx.info.available_psks,
+            &mut ctx.info.crypto,
+        )?;
+        handshake.finish_partial_transcript_hash(&mut ctx.info.crypto);
+        Ok(())
+    })
 }
 
 fn alloc_client_finish(
@@ -314,18 +315,16 @@ fn alloc_client_finish(
 ) -> Result<(), DtlsError> {
     let seq_num = ctx.next_send_seq_num();
     let epoch_state = &mut conn.epochs[2];
-    net_queue
-        .alloc_client_finish(2, now_ms, &mut |buffer| -> Result<(), DtlsError> {
-            let mut handshake =
-                EncodeHandshakeMessage::new(buffer, HandshakeType::Finished, seq_num)?;
-            encode_finished(
-                handshake.payload_buffer(),
-                &epoch_state.write_traffic_secret,
-                ctx.info.crypto.crypto_state_mut()?,
-            )?;
-            handshake.finish(&mut ctx.info.crypto);
-            Ok(())
-        })
+    net_queue.alloc_client_finish(2, now_ms, &mut |buffer| -> Result<(), DtlsError> {
+        let mut handshake = EncodeHandshakeMessage::new(buffer, HandshakeType::Finished, seq_num)?;
+        encode_finished(
+            handshake.payload_buffer(),
+            &epoch_state.write_traffic_secret,
+            ctx.info.crypto.crypto_state_mut()?,
+        )?;
+        handshake.finish(&mut ctx.info.crypto);
+        Ok(())
+    })
 }
 
 pub fn handle_handshake_message_client(
@@ -349,7 +348,9 @@ pub fn handle_handshake_message_client(
             Ok(())
         },
     )?;
-    if *state == ClientState::WaitEncryptedExtensions && !matches!(net_queue.state, NetQueueState::ClientReorder(_)) {
+    if *state == ClientState::WaitEncryptedExtensions
+        && !matches!(net_queue.state, NetQueueState::ClientReorder(_))
+    {
         net_queue.state = NetQueueState::ClientReorder(None);
     }
     if let Some(cookie) = cookie {
@@ -416,16 +417,15 @@ fn try_unpack_handshake_message<'b>(
             if handshake_type == HandshakeType::Finished {
                 // would maybe be better to check for ClientState::WaitEncryptedExtensions, but it's not available here
                 if let NetQueueState::ClientReorder(_) = &mut net_queue.state {
-                    trace!(
+                    debug!(
                         "Saving finish message to record_queue with too new handshake_seq_num: {}",
                         seq_num
                     );
-                    let res = net_queue
-                        .alloc_client_reorder(seq_num, &mut |buf| {
-                            buf.expect_length(message.capacity())?;
-                            buf.write_into(&message.complete_inner_buffer()[message_start..]);
-                            Ok(())
-                        });
+                    let res = net_queue.alloc_client_reorder(seq_num, &mut |buf| {
+                        buf.expect_length(message.capacity())?;
+                        buf.write_into(&message.complete_inner_buffer()[message_start..]);
+                        Ok(())
+                    });
                     match res {
                         Ok(()) | Err(DtlsError::OutOfMemory) => Ok(None),
                         Err(err) => Err(err),
@@ -437,7 +437,7 @@ fn try_unpack_handshake_message<'b>(
                 Ok(None)
             }
         } else {
-            trace!(
+            debug!(
                 "Dropped handshake message with too old handshake_seq_num: {}",
                 seq_num
             );
@@ -458,7 +458,7 @@ fn receive_client(
     match state {
         ClientState::WaitServerHello => {
             assert_handshake_type(handshake_type, HandshakeType::ServerHello)?;
-            trace!("[Client] Received server_hello");
+            debug!("[Client] Received server_hello");
             let server_hello_variant = Some(parse_server_hello(
                 message.payload_buffer(),
                 CipherSuite::all(),
@@ -479,14 +479,14 @@ fn receive_client(
         }
         ClientState::WaitEncryptedExtensions => {
             assert_handshake_type(handshake_type, HandshakeType::EncryptedExtension)?;
-            trace!("[Client] Received encrypted_extensions");
+            debug!("[Client] Received encrypted_extensions");
             parse_encrypted_extensions(message.payload_buffer())?;
             message.add_to_transcript_hash(&mut info.crypto);
             *state = ClientState::WaitFinished;
         }
         ClientState::WaitFinished => {
             assert_handshake_type(handshake_type, HandshakeType::Finished)?;
-            trace!("[Client] Received finished");
+            debug!("[Client] Received finished");
             parse_finished(
                 message.payload_buffer(),
                 &conn.epochs[conn.current_epoch as usize & 3].read_traffic_secret,
@@ -495,7 +495,7 @@ fn receive_client(
             message.add_to_transcript_hash(&mut info.crypto);
             *state = ClientState::SendFinished;
         }
-        _ => todo!(),
+        _ => return Err(DtlsError::IllegalInnerState),
     }
     Ok(None)
 }
@@ -528,7 +528,7 @@ pub fn process_server(
     let mut send = false;
     let poll = match state {
         ServerState::RecvdClientHello => {
-            trace!("[Server] Send server_hello");
+            debug!("[Server] Send server_hello");
             net_queue.state = NetQueueState::ServerResend(ServerResend::default());
             let seq_num = ctx.next_send_seq_num();
             net_queue.alloc_server_hello(0, now_ms, &mut |buffer| {
@@ -549,7 +549,7 @@ pub fn process_server(
             ctx.info
                 .advance_to_epoch_two(conn, "c hs traffic", "s hs traffic")?;
 
-            trace!("[Server] Send encrypted_extensions");
+            debug!("[Server] Send encrypted_extensions");
             let seq_num = ctx.next_send_seq_num();
             net_queue.alloc_encrypted_extensions(2, now_ms, &mut |buffer| {
                 let mut handshake = EncodeHandshakeMessage::new(
@@ -561,7 +561,7 @@ pub fn process_server(
                 handshake.finish(&mut ctx.info.crypto);
                 Ok(())
             })?;
-            trace!("[Server] Send finished");
+            debug!("[Server] Send finished");
             let seq_num = ctx.next_send_seq_num();
             net_queue.alloc_server_finished(2, now_ms, &mut |buffer| {
                 let epoch_state = &mut conn.epochs[(conn.current_epoch as usize) & 3];
@@ -604,7 +604,11 @@ pub fn handle_handshake_message_server(
         &mut |info, handshake_type, handshake| {
             receive_server(state, info, conn, handshake_type, handshake)
         },
-    )
+    )?;
+    if matches!(*state, ServerState::FinishedHandshake) {
+        net_queue.state = NetQueueState::Empty;
+    }
+    Ok(())
 }
 
 fn receive_server(
@@ -617,7 +621,7 @@ fn receive_server(
     match state {
         ServerState::WaitFinished => {
             assert_handshake_type(handshake_type, HandshakeType::Finished)?;
-            trace!("[Server] Received finished");
+            debug!("[Server] Received finished");
             parse_finished(
                 message.payload_buffer(),
                 &conn.epochs[2].read_traffic_secret,
@@ -626,7 +630,7 @@ fn receive_server(
             *state = ServerState::FinishedHandshake;
             message.add_to_transcript_hash(&mut info.crypto);
         }
-        _ => todo!(),
+        _ => return Err(DtlsError::IllegalInnerState),
     }
     Ok(())
 }

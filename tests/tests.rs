@@ -18,8 +18,9 @@ use {
 #[cfg(feature = "async")]
 use {embedded_nal_async::UdpStack, std::net::Ipv4Addr};
 
-use log::info;
+use log::{debug, info};
 
+#[derive(Clone, Copy)]
 pub enum Action {
     Drop,
     Store,
@@ -27,13 +28,52 @@ pub enum Action {
     Duplicate,
 }
 
+impl Action {
+    fn run(
+        &self,
+        proxy: &mut Proxy,
+        addr: &SocketAddr,
+        recv_addr: &SocketAddr,
+        recv_buf: &[u8],
+    ) -> bool {
+        match self {
+            Action::SendStored => panic!(),
+            Action::Drop => {
+                debug!("Drop {addr:?} => {recv_addr:?}");
+                true
+            }
+            Action::Store => {
+                debug!("Store {addr:?} => {recv_addr:?}");
+                if addr == &proxy.client {
+                    assert!(proxy.client_stored.is_none());
+                    proxy.client_stored = Some((*recv_addr, recv_buf.to_vec()));
+                } else {
+                    assert!(proxy.server_stored.is_none());
+                    proxy.server_stored = Some((*recv_addr, recv_buf.to_vec()));
+                }
+                true
+            }
+            Action::Duplicate => {
+                debug!("Duplicate {addr:?} => {recv_addr:?}");
+                proxy.socket.send_to(recv_buf, recv_addr).unwrap();
+                false
+            }
+        }
+    }
+}
+
 pub struct Proxy {
-    packet_count: u32,
-    stored: Option<(SocketAddr, Vec<u8>)>,
+    client_action_index: u32,
+    server_action_index: u32,
+    client_stored: Option<(SocketAddr, Vec<u8>)>,
+    server_stored: Option<(SocketAddr, Vec<u8>)>,
     client: SocketAddr,
     server: SocketAddr,
     socket: UdpSocket,
-    actions: HashMap<u32, Action>,
+    client_actions: HashMap<u32, Action>,
+    server_actions: HashMap<u32, Action>,
+    allowed_client_msgs: i32,
+    allowed_server_msgs: i32,
     stopper: Arc<Mutex<bool>>,
 }
 
@@ -46,64 +86,107 @@ impl Default for Proxy {
 impl Proxy {
     pub fn new() -> Self {
         Self {
-            packet_count: 0,
-            stored: None,
+            client_action_index: 0,
+            server_action_index: 0,
+            client_stored: None,
+            server_stored: None,
             client: SocketAddr::from(([127, 0, 0, 1], CLIENT_PORT)),
             server: SocketAddr::from(([127, 0, 0, 1], SERVER_PORT)),
             socket: UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], PROXY_PORT))).unwrap(),
-            actions: HashMap::new(),
+            client_actions: HashMap::new(),
+            server_actions: HashMap::new(),
+            allowed_client_msgs: i32::MAX,
+            allowed_server_msgs: i32::MAX,
             stopper: Arc::new(Mutex::new(false)),
         }
     }
+    pub fn max_client_msgs(&mut self, max_msg: u16) -> &mut Self {
+        self.allowed_client_msgs = max_msg as i32;
+        self
+    }
 
-    pub fn add_action(&mut self, package_number: u32, action: Action) {
-        self.actions.insert(package_number, action);
+    pub fn client_action(&mut self, package_number: u32, action: Action) -> &mut Self {
+        self.client_actions.insert(package_number, action);
+        self
+    }
+
+    pub fn max_server_msgs(&mut self, max_msg: u16) -> &mut Self {
+        self.allowed_server_msgs = max_msg as i32;
+        self
+    }
+
+    pub fn server_action(&mut self, package_number: u32, action: Action) -> &mut Self {
+        self.server_actions.insert(package_number, action);
+        self
     }
 
     pub fn run(mut self) -> Stopper {
         let stopper = self.stopper.clone();
-        let thread = thread::spawn(move || {
-            let mut buffer = [0; 500];
-            self.socket
-                .set_read_timeout(Some(Duration::from_millis(100)))
-                .unwrap();
-            while !*self.stopper.try_lock().unwrap() {
-                let action = self.actions.get(&self.packet_count);
-                self.packet_count += 1;
+        let thread = thread::Builder::new()
+            .name("Proxy".to_string())
+            .spawn(move || {
+                let mut buffer = [0; 500];
+                self.socket
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap();
+                while !*self.stopper.try_lock().unwrap() {
+                    assert!(
+                        self.allowed_client_msgs >= 0,
+                        "Client sent more messages than allowed"
+                    );
+                    assert!(
+                        self.allowed_server_msgs >= 0,
+                        "Server sent more messages than allowed"
+                    );
 
-                if let Some(Action::SendStored) = action {
-                    let (addr, buf) = self.stored.take().unwrap();
-                    self.socket.send_to(&buf, addr).unwrap();
-                    continue;
-                }
-                let Ok((read, addr)) = self.socket.recv_from(&mut buffer) else {
-                    continue;
-                };
-                let recv_addr = if addr == self.client {
-                    self.server
-                } else {
-                    self.client
-                };
-                println!("RECEIVED");
+                    let client_action = self.client_actions.get(&self.client_action_index).copied();
+                    let server_action = self.server_actions.get(&self.server_action_index).copied();
 
-                match action {
-                    Some(Action::Drop) => {
+                    if let Some(Action::SendStored) = client_action {
+                        let (addr, buf) = self.client_stored.take().unwrap();
+                        debug!("Send stored {:?} => {addr:?}", &self.client);
+                        self.socket.send_to(&buf, addr).unwrap();
+                        self.client_action_index += 1;
                         continue;
                     }
-                    Some(Action::Store) => {
-                        assert!(self.stored.is_none());
-                        self.stored = Some((recv_addr, buffer[..read].to_vec()));
+                    if let Some(Action::SendStored) = server_action {
+                        let (addr, buf) = self.server_stored.take().unwrap();
+                        debug!("Send stored {:?} => {addr:?}", &self.server);
+                        self.socket.send_to(&buf, addr).unwrap();
+                        self.server_action_index += 1;
                         continue;
                     }
-                    Some(Action::Duplicate) => {
+
+                    let Ok((read, addr)) = self.socket.recv_from(&mut buffer) else {
+                        continue;
+                    };
+
+                    if addr == self.client {
+                        let recv_addr = self.server;
+                        self.allowed_client_msgs -= 1;
+                        self.client_action_index += 1;
+                        if let Some(action) = client_action {
+                            if action.run(&mut self, &addr, &recv_addr, &buffer[..read]) {
+                                continue;
+                            }
+                        }
                         self.socket.send_to(&buffer[..read], recv_addr).unwrap();
+                    } else if addr == self.server {
+                        let recv_addr = self.client;
+                        self.allowed_server_msgs -= 1;
+                        self.server_action_index += 1;
+                        if let Some(action) = server_action {
+                            if action.run(&mut self, &addr, &recv_addr, &buffer[..read]) {
+                                continue;
+                            }
+                        }
+                        self.socket.send_to(&buffer[..read], recv_addr).unwrap();
+                    } else {
+                        panic!()
                     }
-                    _ => {}
                 }
-                println!("SENT");
-                self.socket.send_to(&buffer[..read], recv_addr).unwrap();
-            }
-        });
+            })
+            .unwrap();
         Stopper { stopper, thread }
     }
 }
@@ -144,7 +227,6 @@ async fn run_handshake_async(
         ))
         .await
         .unwrap();
-    println!("{addr:?}");
 
     let mut stack = DtlsStackAsync::<'_, _, _, _, 10>::new(
         &mut rand,
@@ -200,7 +282,7 @@ async fn run_handshake_async(
 fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_data: bool) {
     let socket = Mutex::new(UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], own_port))).unwrap());
     let mut send_to_peer = |addr: &SocketAddr, buf: &[u8]| {
-        info!("[{own_port}] Send message. Size: {}", buf.len());
+        debug!("[{own_port}] Send message. Size: {}", buf.len());
         socket.lock().unwrap().send_to(buf, addr).unwrap();
     };
     let got_app_data = Cell::new(false);
@@ -238,7 +320,7 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
         let poll = poll.unwrap();
         match poll {
             DtlsPoll::WaitTimeoutMs(ms) => {
-                info!("[{own_port}] Wait {ms}");
+                debug!("[{own_port}] Wait {ms}");
                 socket
                     .lock()
                     .unwrap()
@@ -246,7 +328,7 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
                     .unwrap();
             }
             DtlsPoll::Wait => {
-                info!("[{own_port}] Wait");
+                debug!("[{own_port}] Wait");
                 socket.lock().unwrap().set_read_timeout(None).unwrap();
             }
             DtlsPoll::FinishedHandshake => {
@@ -281,16 +363,22 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
 
 #[cfg(not(feature = "async"))]
 fn run_server(send_app_data: bool) -> JoinHandle<()> {
-    thread::spawn(move || {
-        run_handshake(SERVER_PORT, PROXY_PORT, true, send_app_data);
-    })
+    thread::Builder::new()
+        .name("Server".to_string())
+        .spawn(move || {
+            run_handshake(SERVER_PORT, PROXY_PORT, true, send_app_data);
+        })
+        .unwrap()
 }
 
 #[cfg(not(feature = "async"))]
 fn run_client() -> JoinHandle<()> {
-    thread::spawn(|| {
-        run_handshake(CLIENT_PORT, PROXY_PORT, false, false);
-    })
+    thread::Builder::new()
+        .name("Client".to_string())
+        .spawn(move || {
+            run_handshake(CLIENT_PORT, PROXY_PORT, false, false);
+        })
+        .unwrap()
 }
 
 const PROXY_PORT: u16 = 11111;
@@ -298,7 +386,7 @@ const SERVER_PORT: u16 = 62447;
 const CLIENT_PORT: u16 = 62446;
 
 #[cfg(feature = "async")]
-fn handshake_test(proxy: Proxy, send_app_data: bool, timeout_milis: u64) {
+fn handshake_test(proxy: Proxy, send_app_data: bool) {
     let _ = simple_logger::SimpleLogger::new().init();
     let proxy = proxy.run();
 
@@ -317,7 +405,7 @@ fn handshake_test(proxy: Proxy, send_app_data: bool, timeout_milis: u64) {
 
             tokio::select! {
                 _ = set.join_all() => {}
-                _ = tokio::time::sleep(Duration::from_millis(timeout_milis)) => {panic!("Test timed out")}
+                _ = tokio::time::sleep(Duration::from_millis(4000)) => {panic!("Test timed out")}
             }
         }).await;
     });
@@ -325,17 +413,25 @@ fn handshake_test(proxy: Proxy, send_app_data: bool, timeout_milis: u64) {
 }
 
 #[cfg(not(feature = "async"))]
-fn handshake_test(proxy: Proxy, send_app_data: bool, timeout_milis: u64) {
+fn handshake_test(mut proxy: Proxy, server_send_app_data: bool) {
     let _ = simple_logger::SimpleLogger::new()
-        // .with_level(log::LevelFilter::Info)
+        .with_level(log::LevelFilter::Debug)
         .init();
     let proxy = proxy.run();
-    let s = run_server(send_app_data);
+    let s = run_server(server_send_app_data);
     thread::sleep(Duration::from_millis(100));
     let c = run_client();
-    thread::sleep(Duration::from_millis(timeout_milis));
-    assert!(s.is_finished());
-    assert!(c.is_finished());
+
+    let mut t: u64 = 5000;
+    while t > 0 {
+        thread::sleep(Duration::from_millis(100));
+        t = t.saturating_sub(100);
+        if s.is_finished() && c.is_finished() {
+            break;
+        }
+    }
+    assert!(s.is_finished(), "Server timed out");
+    assert!(c.is_finished(), "Client timed out");
     s.join().unwrap();
     c.join().unwrap();
     proxy.stop();
@@ -343,84 +439,128 @@ fn handshake_test(proxy: Proxy, send_app_data: bool, timeout_milis: u64) {
 
 #[test]
 fn simple_handshake() {
-    handshake_test(Proxy::new(), false, 500)
+    let mut proxy = Proxy::new();
+    proxy.max_client_msgs(4).max_server_msgs(5);
+    handshake_test(proxy, false)
 }
+
+const C_MSGS_DFLT: u16 = 4;
+const S_MSGS_DFLT: u16 = 5;
 
 #[test]
 fn reorder_encrypted_extensions_hello() {
     let mut proxy = Proxy::new();
-    proxy.add_action(4, Action::Store);
-    proxy.add_action(6, Action::SendStored);
-    handshake_test(proxy, false, 1100)
+    proxy
+        .server_action(2, Action::Store)
+        .server_action(4, Action::SendStored)
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT);
+
+    handshake_test(proxy, false)
 }
 
 #[test]
 fn lost_client_1_hello() {
     let mut proxy = Proxy::new();
-    proxy.add_action(0, Action::Drop);
-    handshake_test(proxy, false, 1100)
+    proxy
+        .client_action(0, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT);
+    handshake_test(proxy, false)
 }
 
 #[test]
 fn lost_client_1_hello_multiple_times() {
     let mut proxy = Proxy::new();
-    proxy.add_action(0, Action::Drop);
-    proxy.add_action(1, Action::Drop);
-    handshake_test(proxy, false, 2100)
+    proxy
+        .client_action(0, Action::Drop)
+        .client_action(1, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT + 2)
+        .max_server_msgs(S_MSGS_DFLT);
+
+    handshake_test(proxy, false)
 }
 
 #[test]
 fn lost_hello_retry_hello() {
     let mut proxy = Proxy::new();
-    proxy.add_action(1, Action::Drop);
-    handshake_test(proxy, false, 1100)
+    proxy
+        .server_action(0, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT + 1);
+
+    handshake_test(proxy, false)
 }
 
 #[test]
 fn lost_client_2_hello() {
     let mut proxy = Proxy::new();
-    proxy.add_action(2, Action::Drop);
-    handshake_test(proxy, false, 1100)
+    proxy
+        .client_action(1, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT);
+
+    handshake_test(proxy, false)
 }
 
 #[test]
 fn lost_server_hello() {
     let mut proxy = Proxy::new();
-    proxy.add_action(3, Action::Drop);
-    handshake_test(proxy, false, 1100)
+    proxy
+        .server_action(1, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT + 3);
+    handshake_test(proxy, false)
 }
 
 #[test]
 fn lost_encrypted_extensions() {
     let mut proxy = Proxy::new();
-    proxy.add_action(4, Action::Drop);
-    handshake_test(proxy, false, 1100)
+    proxy
+        .server_action(2, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT + 3);
+    handshake_test(proxy, false)
 }
 
 #[test]
 fn lost_server_finished() {
     let mut proxy = Proxy::new();
-    proxy.add_action(5, Action::Drop);
-    handshake_test(proxy, false, 1100)
+    proxy
+        .server_action(3, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT + 3);
+    handshake_test(proxy, false)
 }
 
 #[test]
 fn lost_client_finished() {
     let mut proxy = Proxy::new();
-    proxy.add_action(6, Action::Drop);
-    handshake_test(proxy, false, 1100)
+    proxy
+        .client_action(2, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT + 3);
+
+    handshake_test(proxy, false)
 }
 
 #[test]
 fn lost_ack() {
     let mut proxy = Proxy::new();
-    proxy.add_action(7, Action::Drop);
-    handshake_test(proxy, false, 1100)
+    proxy
+        .server_action(4, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT + 1);
+
+    handshake_test(proxy, false)
 }
 
 #[test]
-fn lost_ack_2() {
+fn implicit_ack_using_app_data() {
     let mut proxy = Proxy::new();
-    proxy.add_action(7, Action::Drop);
-    handshake_test(proxy, true, 1100)
+    proxy
+        .server_action(4, Action::Drop)
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT + 1);
+    handshake_test(proxy, true)
 }

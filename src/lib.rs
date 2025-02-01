@@ -29,12 +29,12 @@ mod asynchronous;
 pub use asynchronous::{DtlsStackAsync, Event};
 
 mod sync;
-pub use sync::DtlsStack;
 pub use netqueue::NetQueue;
+pub use sync::DtlsStack;
 
-mod netqueue;
 mod crypto;
 mod handshake;
+mod netqueue;
 mod parsing;
 mod record_parsing;
 
@@ -200,7 +200,7 @@ fn try_pass_packet_to_connection<'a>(
                 packet_buffer.offset()..packet_buffer.capacity(),
             ),
             Ok(RecordContentType::DtlsHandshake) => {
-                trace!("Already established connection received handshake message");
+                trace!("Received handshake message on existing connection");
                 match ParseHandshakeMessage::retrieve_content_type(&mut packet_buffer) {
                     // The first ack might have gone lost
                     Ok(
@@ -208,7 +208,7 @@ fn try_pass_packet_to_connection<'a>(
                         | HandshakeType::EncryptedExtension
                         | HandshakeType::Finished,
                     ) if connection.current_epoch < 6 => {
-                        trace!("Found retransmitted handshake message. Resending ack.");
+                        debug!("Found retransmitted handshake message. Resending ack.");
                         DeferredAction::Send(stage_ack(
                             staging_buffer,
                             &mut connection.epochs,
@@ -299,7 +299,7 @@ fn try_pass_packet_to_handshake<'a>(
             else if content_type == RecordContentType::ApplicationData
                 && matches!(state, HandshakeState::Client(ClientState::WaitServerAck))
             {
-                trace!("[Client] Acked client finished through app data");
+                debug!("[Client] Acked client finished through app data");
                 let start = packet.offset();
                 let end = packet.capacity();
                 let id = ctx.conn_id;
@@ -340,6 +340,7 @@ fn try_pass_packet_to_handshake<'a>(
                     state,
                     HandshakeState::Server(ServerState::FinishedHandshake)
                 ) {
+                    debug!("[Server] Send ACK for client finish");
                     return Ok(DeferredAction::Send(stage_ack(
                         staging_buffer,
                         &mut connection.epochs,
@@ -466,7 +467,7 @@ fn try_open_new_handshake<'a>(
             &mut handshake_slot.net_queue,
         ) {
             Ok(ClientHelloResult::MissingCookie) => {
-                trace!("Did not found valid cookie. Sending hello_retry");
+                debug!("[Server] Didn't find valid cookie. Sending hello_retry");
                 client_hello.add_to_transcript_hash(&mut ctx.info.crypto);
                 send_buf = Some(stage_hello_retry_message(
                     staging_buffer,
@@ -477,7 +478,7 @@ fn try_open_new_handshake<'a>(
             }
             Ok(ClientHelloResult::Ok) => {
                 if require_cookie {
-                    trace!("Found valid cookie opening handshake");
+                    debug!("[Server] Found valid cookie opening handshake");
                 }
                 parse_client_hello_second_pass(
                     client_hello.payload_buffer(),

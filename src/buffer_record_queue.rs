@@ -47,10 +47,9 @@ impl<'a> EntryIterator<'a> {
                     continue;
                 }
                 if &rt.rt_timestamp_ms <= self.now_ms {
-                    trace!(
-                        "Retransmitting entry: epoch: {}, last_record_seq_num: {}",
-                        rt.epoch,
-                        rt.seq_num,
+                    debug!(
+                        "Retransmitting record: epoch: {}, last sent with record_seq_num: {}",
+                        rt.epoch, rt.seq_num,
                     );
                     rt.tick_rt_count(self.now_ms)?;
                     self.next_rt_timestamp = self.next_rt_timestamp.min(rt.rt_timestamp_ms);
@@ -90,7 +89,6 @@ impl<'a> BufferMessageQueue<'a> {
         epoch: EpochShort,
         send_bytes: &mut dyn FnMut(&[u8]),
     ) -> Result<DtlsPoll, DtlsError> {
-        trace!("Running retransmission");
         let mut iter = EntryIterator::new(self.message_queue.iter_mut(), now_ms);
         while let Some(rt) = iter.try_next()? {
             let buf = send_entry(self.buffer, rt, stage_buffer, epoch_states, epoch)?;
@@ -108,7 +106,6 @@ impl<'a> BufferMessageQueue<'a> {
         epoch: EpochShort,
         socket: &mut SocketAndAddr<'_, Socket>,
     ) -> Result<DtlsPoll, DtlsError> {
-        trace!("Running retransmission");
         let mut iter = EntryIterator::new(self.message_queue.iter_mut(), now_ms);
         while let Some(rt) = iter.try_next()? {
             let buf = send_entry(self.buffer, rt, stage_buffer, epoch_states, epoch)?;
@@ -242,12 +239,16 @@ impl<'a> BufferMessageQueue<'a> {
         Ok(ParseBuffer::init(record_data.to_slice(self.buffer)))
     }
 
-    pub fn free_entry(&mut self, index: usize) {
+    pub fn free_entry_by_index(&mut self, index: usize) {
         let Some(entry) = self.message_queue.iter_mut().nth(index) else {
             warn!("Used invalid index!");
             return;
         };
         let entry = entry.take();
+        self.free_entry(&entry);
+    }
+
+    fn free_entry(&mut self, entry: &Entry) {
         self.free_data(entry.record_data_raw());
         self.clean_entries();
     }
@@ -297,6 +298,18 @@ impl<'a> BufferMessageQueue<'a> {
     pub fn clear_record_queue(&mut self) {
         self.message_queue.clear();
         self.buffer_pos = 0;
+    }
+
+    pub fn clear_retransmission(&mut self) {
+        let mut i = 0usize;
+        while i < self.message_queue.len() {
+            let entry = self.message_queue.iter_mut().nth(i).unwrap();
+            if matches!(entry, Entry::Retransmission(_)) {
+                let entry = &entry.take();
+                self.free_entry(entry);
+            }
+            i += 1;
+        }
     }
 
     pub fn reset(&mut self) {

@@ -2,9 +2,9 @@
 
 macro_rules! print_bytes {
     ($label:expr, $bytes:expr) => {
-        debug!("{}", $label);
+        trace!("{}", $label);
         if $bytes.len() == 0 {
-            debug!("    -");
+            trace!("    -");
         } else {
             $bytes.chunks(16).for_each(|chunk| {
                 let mut chunk_str = [b' '; 4 + 16 * 3 + 1 + 16];
@@ -24,7 +24,7 @@ macro_rules! print_bytes {
                         if *byte < 32 || *byte > 126 { 46 } else { *byte };
                 });
 
-                debug!("{}", unsafe { core::str::from_utf8_unchecked(&chunk_str) });
+                trace!("{}", unsafe { core::str::from_utf8_unchecked(&chunk_str) });
             });
         }
     };
