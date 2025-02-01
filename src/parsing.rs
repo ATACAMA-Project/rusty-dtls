@@ -777,7 +777,6 @@ pub fn parse_client_hello_first_pass(
     // legacy version field ignored on server side (my way of understanding)
     buffer.add_offset(2);
 
-    // TODO: check if random is individually needed later
     buffer.add_offset(32);
 
     // if we ignore cached sessions we could ignore this field...

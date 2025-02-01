@@ -604,13 +604,6 @@ pub enum HandshakeState {
     Server(ServerState),
 }
 
-// pub enum HandshakeSlot<'a> {
-//     Client(ClientState, HandshakeContext<'a>),
-//     Server(ServerState, HandshakeContext<'a>),
-//     Finished(ConnectionId, &'a mut [u8], &'a [Psk<'a>]),
-//     Empty(&'a mut [u8], &'a [Psk<'a>]),
-// }
-
 impl<'a> HandshakeSlot<'a> {
     pub fn new(available_psks: &'a [Psk<'a>], buffer: &'a mut [u8]) -> Self {
         HandshakeSlot {
