@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use rand::{RngCore, SeedableRng};
 use rusty_dtls::{HandshakeSlot, HashFunction, Psk};
 
 #[cfg(not(feature = "async"))]
@@ -170,6 +171,7 @@ impl Proxy {
                                 continue;
                             }
                         }
+                        debug!("Forwarding {addr:?} => {recv_addr:?} {read}");
                         self.socket.send_to(&buffer[..read], recv_addr).unwrap();
                     } else if addr == self.server {
                         let recv_addr = self.client;
@@ -180,6 +182,7 @@ impl Proxy {
                                 continue;
                             }
                         }
+                        debug!("Forwarding {addr:?} => {recv_addr:?} {read}");
                         self.socket.send_to(&buffer[..read], recv_addr).unwrap();
                     } else {
                         panic!()
@@ -214,7 +217,11 @@ async fn run_handshake_async(
 
     let mut buffer = [0; 1024];
     let mut staging_buffer = [0; 256];
-    let mut rand = rand::thread_rng();
+
+    let seed = rand::thread_rng().next_u64();
+    info!("[{own_port}] Using seed {seed}");
+    let mut rand = rand::rngs::StdRng::seed_from_u64(seed);
+
     let psks = [Psk::new(&[123], &[1, 2, 3, 4, 5], HashFunction::Sha256)];
 
     let delay = linux_embedded_hal::Delay;
@@ -297,7 +304,11 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
 
     let mut buffer = [0; 1024];
     let mut staging_buffer = [0; 200];
-    let mut rand = rand::thread_rng();
+
+    let seed = rand::thread_rng().next_u64();
+    info!("[{own_port}] Using seed {seed}");
+    let mut rand = rand::rngs::StdRng::seed_from_u64(seed);
+
     let psks = [Psk::new(&[123], &[1, 2, 3, 4, 5], HashFunction::Sha256)];
     let mut stack =
         DtlsStack::<10>::new(&mut rand, &mut staging_buffer, &mut send_to_peer).unwrap();
@@ -352,6 +363,7 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
         let Ok((received, addr)) = socket.lock().unwrap().recv_from(stack.staging_buffer()) else {
             continue;
         };
+        debug!("[{own_port}] Rcv {received}");
         stack
             .handle_dtls_packet(&mut handshakes, &addr, received, &mut handle_app_data)
             .unwrap();
@@ -413,7 +425,7 @@ fn handshake_test(proxy: Proxy, send_app_data: bool) {
 }
 
 #[cfg(not(feature = "async"))]
-fn handshake_test(mut proxy: Proxy, server_send_app_data: bool) {
+fn handshake_test(proxy: Proxy, server_send_app_data: bool) {
     let _ = simple_logger::SimpleLogger::new()
         .with_level(log::LevelFilter::Debug)
         .init();

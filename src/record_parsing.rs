@@ -269,11 +269,13 @@ pub fn parse_ciphertext_record(
         &mut payload[..encrypted_plaintext_len as usize],
     )?;
 
-    let padding_bytes_count = payload.iter().rev().take_while(|b| **b == 0).count();
-    let payload_len = encrypted_plaintext_len as usize
-        - 1
-        - padding_bytes_count
-        - mac_length(&epoch_state.read_traffic_secret);
+    let mac_length = mac_length(&epoch_state.read_traffic_secret);
+    let padding_bytes_count = payload[..encrypted_plaintext_len as usize - mac_length]
+        .iter()
+        .rev()
+        .take_while(|b| **b == 0)
+        .count();
+    let payload_len = encrypted_plaintext_len as usize - 1 - padding_bytes_count - mac_length;
     let content_type: RecordContentType = payload[payload_len].try_into()?;
 
     epoch_state.mark_received(&reconstructed_sequence_num);
