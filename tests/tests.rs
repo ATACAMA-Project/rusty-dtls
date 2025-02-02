@@ -25,8 +25,15 @@ use log::{debug, info};
 const HANDSHAKE_BUFFER_SIZE: usize = 200 + 64 + 2 * 9;
 
 #[derive(Clone, Copy)]
+pub enum HeaderUpdate {
+    NewLength(u16),
+}
+
+#[derive(Clone, Copy)]
 pub enum Action {
     Drop,
+    BitFlip(usize),
+    UpatePlaintextHeader(HeaderUpdate),
     Store,
     SendStored,
     Duplicate,
@@ -38,10 +45,20 @@ impl Action {
         proxy: &mut Proxy,
         addr: &SocketAddr,
         recv_addr: &SocketAddr,
-        recv_buf: &[u8],
+        recv_buf: &mut [u8],
     ) -> bool {
         match self {
             Action::SendStored => panic!(),
+            Action::BitFlip(pos) => {
+                debug!("Flip bit {} in {addr:?} => {recv_addr:?}", pos);
+                recv_buf[pos / 8] ^= 1 << (7 - (pos % 8));
+                false
+            }
+            Action::UpatePlaintextHeader(HeaderUpdate::NewLength(len)) => {
+                debug!("Update length to {} in {addr:?} => {recv_addr:?}", len);
+                recv_buf[11..=12].copy_from_slice(&len.to_be_bytes());
+                false
+            }
             Action::Drop => {
                 debug!("Drop {addr:?} => {recv_addr:?}");
                 true
@@ -170,7 +187,7 @@ impl Proxy {
                         self.allowed_client_msgs -= 1;
                         self.client_action_index += 1;
                         if let Some(action) = client_action {
-                            if action.run(&mut self, &addr, &recv_addr, &buffer[..read]) {
+                            if action.run(&mut self, &addr, &recv_addr, &mut buffer[..read]) {
                                 continue;
                             }
                         }
@@ -181,7 +198,7 @@ impl Proxy {
                         self.allowed_server_msgs -= 1;
                         self.server_action_index += 1;
                         if let Some(action) = server_action {
-                            if action.run(&mut self, &addr, &recv_addr, &buffer[..read]) {
+                            if action.run(&mut self, &addr, &recv_addr, &mut buffer[..read]) {
                                 continue;
                             }
                         }
@@ -451,15 +468,17 @@ fn handshake_test(proxy: Proxy, server_send_app_data: bool) {
     proxy.stop();
 }
 
+const C_MSGS_DFLT: u16 = 4;
+const S_MSGS_DFLT: u16 = 5;
+
 #[test]
 fn simple_handshake() {
     let mut proxy = Proxy::new();
-    proxy.max_client_msgs(4).max_server_msgs(5);
+    proxy
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT);
     handshake_test(proxy, false)
 }
-
-const C_MSGS_DFLT: u16 = 4;
-const S_MSGS_DFLT: u16 = 5;
 
 #[test]
 fn reorder_encrypted_extensions() {
@@ -576,4 +595,47 @@ fn implicit_ack_using_app_data() {
         .max_client_msgs(C_MSGS_DFLT)
         .max_server_msgs(S_MSGS_DFLT + 1);
     handshake_test(proxy, true);
+}
+
+#[test]
+fn encrypted_extensions_header_bitflip() {
+    let mut proxy = Proxy::new();
+    proxy
+        .server_action(2, Action::BitFlip(0)) // Make the client think its not a EncryptedRecord
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT + 3);
+    handshake_test(proxy, false)
+}
+
+#[test]
+fn encrypted_extensions_payload_bitflip() {
+    let mut proxy = Proxy::new();
+    proxy
+        .server_action(2, Action::BitFlip(5 * 8)) // Make the client think its not a EncryptedRecord
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT + 3);
+    handshake_test(proxy, false)
+}
+
+#[test]
+fn client_hello_1_manip_length_to_long() {
+    let mut proxy = Proxy::new();
+    proxy
+        .client_action(
+            0,
+            Action::UpatePlaintextHeader(HeaderUpdate::NewLength(200)),
+        )
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT);
+    handshake_test(proxy, false);
+}
+
+#[test]
+fn client_hello_1_manip_length_to_short() {
+    let mut proxy = Proxy::new();
+    proxy
+        .client_action(0, Action::UpatePlaintextHeader(HeaderUpdate::NewLength(20)))
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT);
+    handshake_test(proxy, false);
 }
