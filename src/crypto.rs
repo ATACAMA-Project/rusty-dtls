@@ -279,7 +279,7 @@ pub fn mac_length(secret: &TrafficSecret) -> usize {
             iv: _,
             sn: _,
         } => <Aes128Gcm as AeadCore>::TagSize::to_usize(),
-        _ => unreachable!("Rust requires this branch for references"),
+        _ => unreachable!("Invalid cipher suite"), // Rust requires this branch for references
     }
 }
 

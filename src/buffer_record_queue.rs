@@ -1,4 +1,4 @@
-use core::{borrow::BorrowMut, mem::size_of};
+use core::borrow::BorrowMut;
 
 use log::{debug, error, trace, warn};
 
@@ -245,10 +245,6 @@ impl<'a> BufferMessageQueue<'a> {
             return;
         };
         let entry = entry.take();
-        self.free_entry(&entry);
-    }
-
-    fn free_entry(&mut self, entry: &Entry) {
         self.free_data(entry.record_data_raw());
         self.clean_entries();
     }
@@ -278,8 +274,10 @@ impl<'a> BufferMessageQueue<'a> {
 
     fn free_data(&mut self, data: &Slice) {
         let Slice { index, len } = data;
+        let len_size = size_of::<usize>();
+        let flag_size = 1;
 
-        if self.buffer_pos == index + len {
+        if self.buffer_pos == index + len + len_size + flag_size {
             self.buffer_pos = *index;
             let len_size = size_of::<usize>();
             while self.buffer_pos > len_size + 1 && self.buffer[self.buffer_pos - 1] == 0 {
@@ -288,7 +286,7 @@ impl<'a> BufferMessageQueue<'a> {
                         .try_into()
                         .expect("size_of works"),
                 );
-                self.buffer_pos -= (len + size_of::<usize>() + 1).min(self.buffer_pos);
+                self.buffer_pos -= (len + len_size + flag_size).min(self.buffer_pos);
             }
         } else {
             self.buffer[index + len] = 0;
@@ -306,10 +304,11 @@ impl<'a> BufferMessageQueue<'a> {
             let entry = self.message_queue.iter_mut().nth(i).unwrap();
             if matches!(entry, Entry::Retransmission(_)) {
                 let entry = &entry.take();
-                self.free_entry(entry);
+                self.free_data(entry.record_data_raw());
             }
             i += 1;
         }
+        self.clean_entries();
     }
 
     pub fn reset(&mut self) {
@@ -498,5 +497,31 @@ impl RetransmissionEntry {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BufferMessageQueue;
+
+    #[test]
+    fn test_alloc_and_free() {
+        let _ = simple_logger::SimpleLogger::new().init();
+        let mut b = [0; 19];
+        let mut bq = BufferMessageQueue::new(&mut b);
+        let slice = bq
+            .alloc_data(&mut |b| {
+                b.expect_length(10)?;
+                b.add_offset(10);
+                Ok(())
+            })
+            .unwrap();
+        bq.free_data(&slice);
+        bq.alloc_data(&mut |b| {
+            b.expect_length(10)?;
+            b.add_offset(10);
+            Ok(())
+        })
+        .unwrap();
     }
 }

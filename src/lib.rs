@@ -145,7 +145,7 @@ struct DtlsConnection<'a> {
     p: PhantomData<&'a ()>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DtlsPoll {
     /// Wait at most until a new message has arrived or the timeout has elapsed before
     /// calling [`poll`] again.

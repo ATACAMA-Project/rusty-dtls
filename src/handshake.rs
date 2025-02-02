@@ -23,7 +23,7 @@ pub struct HandshakeContext<'a> {
     pub info: HandshakeInformation<'a>,
 }
 
-impl<'a> HandshakeContext<'a> {
+impl HandshakeContext<'_> {
     pub(crate) fn connection<'b, 'c>(
         &self,
         connections: &'b mut [Option<DtlsConnection<'c>>],
@@ -94,7 +94,7 @@ impl CryptoInformation {
     }
 }
 
-impl<'a> HandshakeInformation<'a> {
+impl HandshakeInformation<'_> {
     pub fn client_switch_to_post_hello_retry_hash(&mut self) {
         trace!("[Client] Switch to post hello_retry hash");
         let crypto = core::mem::replace(&mut self.crypto, CryptoInformation::None);

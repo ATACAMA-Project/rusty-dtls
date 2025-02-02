@@ -245,9 +245,8 @@ fn try_send_alert_sync<T>(
 
 #[cfg(test)]
 mod tests {
+    use crate::{DtlsError, DtlsStack, HandshakeSlot};
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-    use crate::{DtlsStack, HandshakeSlot};
 
     #[test]
     pub fn fail_open_more_handshakes_than_connections() {
@@ -308,5 +307,26 @@ mod tests {
         assert!(res);
         let res = stack.close_connection(crate::ConnectionId(0));
         assert!(!res);
+    }
+
+    #[test]
+    pub fn overflow_stage_buffer() {
+        let mut rng = rand::thread_rng();
+        let mut send_to_peer = |_: &SocketAddr, _: &[u8]| {};
+        let mut stage_buffer = [0u8; 250];
+        let mut stack =
+            DtlsStack::<1>::new(&mut rng, &mut stage_buffer, &mut send_to_peer).unwrap();
+        let mut hs = [HandshakeSlot::new(&[], &mut [])];
+        let res = stack.open_connection(
+            &mut hs[0],
+            &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        );
+        assert!(res);
+        hs[0].finish_handshake(stack.connections[0].as_mut().unwrap());
+        let cid = hs[0].try_take_connection_id().unwrap();
+        let data = [1u8; 249];
+
+        let e = stack.send_dtls_packet(cid, &data);
+        assert!(matches!(e, Err(DtlsError::OutOfMemory)));
     }
 }

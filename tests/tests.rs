@@ -21,6 +21,9 @@ use {embedded_nal_async::UdpStack, std::net::Ipv4Addr};
 
 use log::{debug, info};
 
+/// CH + Cookie + management info: (1B Flag, 8B Length)
+const HANDSHAKE_BUFFER_SIZE: usize = 200 + 64 + 2 * 9;
+
 #[derive(Clone, Copy)]
 pub enum Action {
     Drop,
@@ -215,7 +218,7 @@ async fn run_handshake_async(
 ) {
     use rusty_dtls::DtlsStackAsync;
 
-    let mut buffer = [0; 1024];
+    let mut buffer = [0; HANDSHAKE_BUFFER_SIZE];
     let mut staging_buffer = [0; 256];
 
     let seed = rand::thread_rng().next_u64();
@@ -302,7 +305,7 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
             }
         };
 
-    let mut buffer = [0; 1024];
+    let mut buffer = [0; HANDSHAKE_BUFFER_SIZE];
     let mut staging_buffer = [0; 200];
 
     let seed = rand::thread_rng().next_u64();
@@ -363,7 +366,6 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
         let Ok((received, addr)) = socket.lock().unwrap().recv_from(stack.staging_buffer()) else {
             continue;
         };
-        debug!("[{own_port}] Rcv {received}");
         stack
             .handle_dtls_packet(&mut handshakes, &addr, received, &mut handle_app_data)
             .unwrap();
@@ -460,7 +462,7 @@ const C_MSGS_DFLT: u16 = 4;
 const S_MSGS_DFLT: u16 = 5;
 
 #[test]
-fn reorder_encrypted_extensions_hello() {
+fn reorder_encrypted_extensions() {
     let mut proxy = Proxy::new();
     proxy
         .server_action(2, Action::Store)
@@ -472,7 +474,7 @@ fn reorder_encrypted_extensions_hello() {
 }
 
 #[test]
-fn lost_client_1_hello() {
+fn lost_client_hello_1() {
     let mut proxy = Proxy::new();
     proxy
         .client_action(0, Action::Drop)
@@ -482,7 +484,7 @@ fn lost_client_1_hello() {
 }
 
 #[test]
-fn lost_client_1_hello_multiple_times() {
+fn lost_client_hello_1_multiple_times() {
     let mut proxy = Proxy::new();
     proxy
         .client_action(0, Action::Drop)
@@ -494,7 +496,7 @@ fn lost_client_1_hello_multiple_times() {
 }
 
 #[test]
-fn lost_hello_retry_hello() {
+fn lost_hello_retry() {
     let mut proxy = Proxy::new();
     proxy
         .server_action(0, Action::Drop)
@@ -505,7 +507,7 @@ fn lost_hello_retry_hello() {
 }
 
 #[test]
-fn lost_client_2_hello() {
+fn lost_client_hello_2() {
     let mut proxy = Proxy::new();
     proxy
         .client_action(1, Action::Drop)
@@ -514,7 +516,6 @@ fn lost_client_2_hello() {
 
     handshake_test(proxy, false)
 }
-
 #[test]
 fn lost_server_hello() {
     let mut proxy = Proxy::new();
@@ -574,5 +575,5 @@ fn implicit_ack_using_app_data() {
         .server_action(4, Action::Drop)
         .max_client_msgs(C_MSGS_DFLT)
         .max_server_msgs(S_MSGS_DFLT + 1);
-    handshake_test(proxy, true)
+    handshake_test(proxy, true);
 }

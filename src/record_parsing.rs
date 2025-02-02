@@ -35,8 +35,6 @@ impl TryFrom<u8> for RecordContentType {
 pub struct EncodePlaintextRecord<'a, 'b> {
     buffer: &'a mut ParseBuffer<&'b mut [u8]>,
     len_pos: usize,
-    #[cfg(debug_assertions)]
-    finished: bool,
 }
 
 impl<'a, 'b> EncodePlaintextRecord<'a, 'b> {
@@ -52,36 +50,18 @@ impl<'a, 'b> EncodePlaintextRecord<'a, 'b> {
         buffer.write_u48(record_sequence_number);
         let len_pos = buffer.offset();
         buffer.add_offset(2);
-        Ok(Self {
-            buffer,
-            len_pos,
-            #[cfg(debug_assertions)]
-            finished: false,
-        })
+        Ok(Self { buffer, len_pos })
     }
 
     pub fn payload_buffer<'c>(&'c mut self) -> &'c mut ParseBuffer<&'b mut [u8]> {
         self.buffer
     }
 
-    #[allow(unused_mut)]
-    pub fn finish(mut self) {
+    pub fn finish(self) {
         let payload_len = self.buffer.offset() - self.len_pos - 2;
         // TLS 1.3 5.1 the length MUST no exceed 2^14 bytes.
         assert!(payload_len < 2 << 14);
         self.buffer.set_u16(self.len_pos, payload_len as u16);
-
-        #[cfg(debug_assertions)]
-        {
-            self.finished = true;
-        }
-    }
-}
-
-impl Drop for EncodePlaintextRecord<'_, '_> {
-    fn drop(&mut self) {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.finished)
     }
 }
 
@@ -130,8 +110,6 @@ pub struct EncodeCiphertextRecord<'a, 'b> {
     buffer: &'a mut ParseBuffer<&'b mut [u8]>,
     seq_num_pos: usize,
     inner_record_len_pos: usize,
-    #[cfg(debug_assertions)]
-    finished: bool,
 }
 
 const CIPHERTEXT_HEADER_LEN: usize = 5;
@@ -152,17 +130,14 @@ impl<'a, 'b> EncodeCiphertextRecord<'a, 'b> {
             buffer,
             seq_num_pos,
             inner_record_len_pos,
-            #[cfg(debug_assertions)]
-            finished: false,
         })
     }
     pub fn payload_buffer<'c>(&'c mut self) -> &'c mut ParseBuffer<&'b mut [u8]> {
         self.buffer
     }
 
-    #[allow(unused_mut)]
     pub fn finish(
-        mut self,
+        self,
         epoch_state: &mut EpochState,
         content_type: RecordContentType,
     ) -> Result<(), DtlsError> {
@@ -196,18 +171,7 @@ impl<'a, 'b> EncodeCiphertextRecord<'a, 'b> {
         self.buffer.add_offset(mac_length);
 
         epoch_state.send_record_seq_num += 1;
-        #[cfg(debug_assertions)]
-        {
-            self.finished = true;
-        }
         Ok(())
-    }
-}
-
-impl Drop for EncodeCiphertextRecord<'_, '_> {
-    fn drop(&mut self) {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.finished)
     }
 }
 

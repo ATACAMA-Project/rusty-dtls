@@ -13,6 +13,7 @@ pub struct ParseBuffer<T> {
     buf: T,
     offset: usize,
 }
+
 impl<T: AsMut<[u8]>> ParseBuffer<T> {
     pub fn complete_inner_buffer_mut(&mut self) -> &mut [u8] {
         self.buf.as_mut()
@@ -112,7 +113,7 @@ impl<T: AsRef<[u8]>> ParseBuffer<T> {
         if self.buf.as_ref().len() - self.offset >= len {
             Ok(())
         } else {
-            Err(DtlsError::ParseError)
+            Err(DtlsError::OutOfMemory)
         }
     }
 
