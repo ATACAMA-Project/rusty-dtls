@@ -5,229 +5,347 @@ use crate::crypto::{
 };
 use crate::handshake::{CryptoInformation, HandshakeContext, HandshakeInformation};
 use crate::{AlertDescription, AlertLevel, DtlsError, Epoch, HandshakeSeqNum, RecordSeqNum};
-use aes_gcm::aead::Buffer;
 use core::mem;
 use core::net::SocketAddr;
+pub use parse_utility::ParseBuffer;
+use parse_utility::Stepper;
 
-pub struct ParseBuffer<T> {
-    buf: T,
-    offset: usize,
-}
+mod parse_utility {
+    use core::ops::Range;
 
-impl<T: AsMut<[u8]>> ParseBuffer<T> {
-    pub fn complete_inner_buffer_mut(&mut self) -> &mut [u8] {
-        self.buf.as_mut()
+    use aes_gcm::aead::Buffer;
+
+    use crate::DtlsError;
+
+    pub struct Stepper<'a, const LEN: usize> {
+        buf: &'a mut [u8],
+        offset: usize,
     }
 
-    pub fn write_u8(&mut self, b: u8) {
-        self.write_into(&b.to_be_bytes());
-    }
-
-    pub fn write_u16(&mut self, b: u16) {
-        self.write_into(&b.to_be_bytes());
-    }
-
-    pub fn set_u16(&mut self, index: usize, b: u16) {
-        self.buf.as_mut()[index..index + 2].copy_from_slice(&b.to_be_bytes())
-    }
-
-    pub fn write_u32(&mut self, b: u32) {
-        self.write_into(&b.to_be_bytes());
-    }
-
-    pub fn write_u64(&mut self, b: u64) {
-        self.write_into(&b.to_be_bytes());
-    }
-
-    pub fn write_u24(&mut self, b: u32) {
-        self.write_into(&b.to_be_bytes()[1..4]);
-    }
-
-    pub fn set_u24(&mut self, index: usize, b: u32) {
-        self.buf.as_mut()[index..index + 3].copy_from_slice(&b.to_be_bytes()[1..])
-    }
-
-    pub fn write_u48(&mut self, b: u64) {
-        self.write_into(&b.to_be_bytes()[2..8]);
-    }
-
-    pub fn write_into(&mut self, src: &[u8]) {
-        self.buf.as_mut()[self.offset..self.offset + src.len()].copy_from_slice(src);
-        self.offset += src.len();
-    }
-
-    pub fn write_prepend_length(
-        &mut self,
-        length_field_length: usize,
-        variable_content: &mut dyn FnMut(&mut Self) -> Result<(), DtlsError>,
-    ) -> Result<usize, DtlsError> {
-        debug_assert!(length_field_length <= core::mem::size_of::<usize>());
-        self.offset += length_field_length;
-
-        let offset_begin = self.offset;
-        variable_content(self)?;
-        let length = self.offset - offset_begin;
-        debug_assert!(
-            length.leading_zeros() as usize
-                >= (core::mem::size_of::<usize>() - length_field_length)
-        );
-        self.buf.as_mut()[offset_begin - length_field_length..offset_begin].copy_from_slice(
-            &length.to_be_bytes()[core::mem::size_of::<usize>() - length_field_length..],
-        );
-        Ok(length)
-    }
-}
-
-impl<T: AsRef<[u8]>> ParseBuffer<T> {
-    pub fn init(buf: T) -> Self {
-        ParseBuffer { buf, offset: 0 }
-    }
-
-    pub fn release_buffer(self) -> T {
-        self.buf
-    }
-
-    pub fn init_with_offset(buf: T, offset: usize) -> Self {
-        debug_assert!(buf.as_ref().len() >= offset);
-        ParseBuffer { buf, offset }
-    }
-
-    pub fn set_offset(&mut self, offset: usize) {
-        debug_assert!(offset < self.buf.as_ref().len());
-        self.offset = offset;
-    }
-
-    pub fn offset(&self) -> usize {
-        self.offset
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.buf.as_ref().len()
-    }
-
-    pub fn complete_inner_buffer(&self) -> &[u8] {
-        self.buf.as_ref()
-    }
-
-    pub fn expect_length(&self, len: usize) -> Result<(), DtlsError> {
-        if self.buf.as_ref().len() - self.offset >= len {
-            Ok(())
-        } else {
-            Err(DtlsError::OutOfMemory)
+    impl<const LEN: usize> Stepper<'_, LEN> {
+        pub fn next(&mut self) -> Option<ParseSlice<'_, LEN>> {
+            if self.offset < self.buf.len() {
+                self.offset += LEN;
+                Some(ParseSlice {
+                    buf: &mut self.buf[self.offset - LEN..self.offset],
+                })
+            } else {
+                None
+            }
         }
     }
 
-    pub fn read_u8(&mut self) -> u8 {
-        let v = self.buf.as_ref()[self.offset];
-        self.offset += 1;
-        v
-    }
-    pub fn read_u16(&mut self) -> u16 {
-        let v = u16::from_be_bytes(
-            self.buf.as_ref()[self.offset..self.offset + 2]
-                .try_into()
-                .unwrap(),
-        );
-        self.offset += 2;
-        v
+    pub struct ParseSlice<'a, const LEN: usize> {
+        buf: &'a mut [u8],
     }
 
-    pub fn read_u32(&mut self) -> u32 {
-        let v = u32::from_be_bytes(
-            self.buf.as_ref()[self.offset..self.offset + 4]
-                .try_into()
-                .unwrap(),
-        );
-        self.offset += 4;
-        v
+    #[cfg(not(debug_assertions))]
+    const fn calc(s: usize, a: usize, b: usize) -> isize {
+        s as isize - a as isize - b as isize
     }
 
-    pub fn read_u64(&mut self) -> u64 {
-        let v = u64::from_be_bytes(
-            self.buf.as_ref()[self.offset..self.offset + 8]
-                .try_into()
-                .unwrap(),
-        );
-        self.offset += 8;
-        v
+    #[cfg(not(debug_assertions))]
+    unsafe extern "C" {
+        fn buffer_overflow();
     }
 
-    pub fn read_u24(&mut self) -> u32 {
-        let mut buf = [0; 4];
-        buf[1..4].copy_from_slice(&self.buf.as_ref()[self.offset..self.offset + 3]);
-        let v = u32::from_be_bytes(buf);
-        self.offset += 3;
-        v
+    impl<const LEN: usize> ParseSlice<'_, LEN> {
+        pub fn read_u8<const I: usize>(&self) -> u8 {
+            u8::from_be_bytes(*self.read_fix::<I, 1>())
+        }
+
+        pub fn read_u16<const I: usize>(&self) -> u16 {
+            u16::from_be_bytes(*self.read_fix::<I, 2>())
+        }
+
+        pub fn read_u24<const I: usize>(&self) -> u32 {
+            let mut buf = [0; 4];
+            buf[1..4].copy_from_slice(self.read_fix::<I, 3>());
+            u32::from_be_bytes(buf)
+        }
+
+        pub fn read_u32<const I: usize>(&self) -> u32 {
+            u32::from_be_bytes(*self.read_fix::<I, 4>())
+        }
+
+        pub fn read_u48<const I: usize>(&self) -> u64 {
+            let mut buf = [0; 8];
+            buf[2..8].copy_from_slice(self.read_fix::<I, 6>());
+            u64::from_be_bytes(buf)
+        }
+
+        pub fn read_u64<const I: usize>(&self) -> u64 {
+            u64::from_be_bytes(*self.read_fix::<I, 8>())
+        }
+
+        pub fn read_as_reference<const I: usize, const L: usize>(&self) -> &[u8] {
+            self.read_fix::<I, L>()
+        }
+
+        pub fn read_fix<const I: usize, const L: usize>(&self) -> &[u8; L] {
+            #[cfg(not(debug_assertions))]
+            if calc(LEN, I, L) < 0 {
+                unsafe {
+                    buffer_overflow();
+                }
+            }
+            (&self.buf[I..I + L]).try_into().unwrap()
+        }
     }
 
-    pub fn read_u48(&mut self) -> u64 {
-        let mut buf = [0; 8];
-        buf[2..8].copy_from_slice(&self.buf.as_ref()[self.offset..self.offset + 6]);
-        let v = u64::from_be_bytes(buf);
-        self.offset += 6;
-        v
-    }
-    pub fn read_as_reference(&mut self, length: usize) -> &[u8] {
-        let begin = self.offset;
-        self.offset += length;
-        return &self.buf.as_ref()[begin..self.offset];
+    pub struct ParseBuffer<'a> {
+        buf: &'a mut [u8],
+        offset: usize,
     }
 
-    pub fn read_exactly_n(&mut self, written_into: &mut [u8], n: usize) {
-        written_into.copy_from_slice(&self.buf.as_ref()[self.offset..self.offset + n]);
-        self.offset += n;
+    impl<'a> ParseBuffer<'a> {
+        pub fn init(buf: &'a mut [u8]) -> Self {
+            ParseBuffer { buf, offset: 0 }
+        }
+
+        pub fn init_with_offset(buf: &'a mut [u8], offset: usize) -> Self {
+            debug_assert!(buf.as_ref().len() >= offset);
+            ParseBuffer { buf, offset }
+        }
+
+        pub fn parse_slice<'b, const LEN: usize>(
+            &'b mut self,
+        ) -> Result<ParseSlice<'b, LEN>, DtlsError> {
+            if self.offset + LEN > self.buf.len() {
+                return Err(DtlsError::OutOfMemory);
+            }
+            self.offset += LEN;
+            Ok(ParseSlice::<'b, LEN> {
+                buf: &mut self.buf[self.offset - LEN..self.offset],
+            })
+        }
+
+        pub fn parse_slice_iter<'b, const LEN: usize>(
+            &'b mut self,
+            buf_len: usize,
+        ) -> Result<Stepper<'b, LEN>, DtlsError> {
+            if buf_len % LEN != 0 {
+                return Err(DtlsError::ParseError);
+            }
+            if buf_len + self.offset > self.buf.len() {
+                return Err(DtlsError::OutOfMemory);
+            }
+            self.offset += buf_len;
+            Ok(Stepper::<'b, LEN> {
+                buf: &mut self.buf[self.offset - buf_len..self.offset],
+                offset: 0,
+            })
+        }
+
+        pub fn read_as_reference_checked(&mut self, len: usize) -> Result<&[u8], DtlsError> {
+            if len + self.offset > self.buf.len() {
+                Err(DtlsError::OutOfMemory)
+            } else {
+                self.offset += len;
+                Ok(&self.buf[self.offset - len..self.offset])
+            }
+        }
+
+        /// Does not affect buffer offset.
+        pub fn slice_checked(&self, r: Range<usize>) -> Result<&[u8], DtlsError> {
+            if r.end > self.buf.len() {
+                Err(DtlsError::OutOfMemory)
+            } else {
+                Ok(&self.buf[r])
+            }
+        }
+        pub fn split_at_mut_checked(
+            &mut self,
+            pos: usize,
+        ) -> Result<(&mut [u8], &mut [u8]), DtlsError> {
+            if pos > self.buf.len() {
+                Err(DtlsError::OutOfMemory)
+            } else {
+                Ok(self.buf.split_at_mut(pos))
+            }
+        }
+
+        pub fn release_buffer(self) -> &'a mut [u8] {
+            self.buf
+        }
+
+        // pub fn complete_inner_buffer_mut(&mut self) -> &mut [u8] {
+        //     self.buf
+        // }
+        #[cfg(test)]
+        pub fn complete_inner_buffer(&self) -> &[u8] {
+            self.buf
+        }
+
+        pub fn write_u8(&mut self, b: u8) {
+            self.write_into(&b.to_be_bytes());
+        }
+
+        pub fn write_u16(&mut self, b: u16) {
+            self.write_into(&b.to_be_bytes());
+        }
+
+        pub fn set_u16(&mut self, index: usize, b: u16) {
+            self.buf[index..index + 2].copy_from_slice(&b.to_be_bytes())
+        }
+
+        pub fn write_u32(&mut self, b: u32) {
+            self.write_into(&b.to_be_bytes());
+        }
+
+        pub fn write_u64(&mut self, b: u64) {
+            self.write_into(&b.to_be_bytes());
+        }
+
+        pub fn write_u24(&mut self, b: u32) {
+            self.write_into(&b.to_be_bytes()[1..4]);
+        }
+
+        pub fn set_u24(&mut self, index: usize, b: u32) {
+            self.buf[index..index + 3].copy_from_slice(&b.to_be_bytes()[1..])
+        }
+
+        pub fn write_u48(&mut self, b: u64) {
+            self.write_into(&b.to_be_bytes()[2..8]);
+        }
+
+        pub fn write_into(&mut self, src: &[u8]) {
+            self.buf[self.offset..self.offset + src.len()].copy_from_slice(src);
+            self.offset += src.len();
+        }
+
+        pub fn write_prepend_length(
+            &mut self,
+            length_field_length: usize,
+            variable_content: &mut dyn FnMut(&mut Self) -> Result<(), DtlsError>,
+        ) -> Result<usize, DtlsError> {
+            debug_assert!(length_field_length <= core::mem::size_of::<usize>());
+            self.offset += length_field_length;
+
+            let offset_begin = self.offset;
+            variable_content(self)?;
+            let length = self.offset - offset_begin;
+            debug_assert!(
+                length.leading_zeros() as usize
+                    >= (core::mem::size_of::<usize>() - length_field_length)
+            );
+            self.buf[offset_begin - length_field_length..offset_begin].copy_from_slice(
+                &length.to_be_bytes()[core::mem::size_of::<usize>() - length_field_length..],
+            );
+            Ok(length)
+        }
+
+        pub fn set_offset(&mut self, offset: usize) {
+            debug_assert!(offset < self.buf.as_ref().len());
+            self.offset = offset;
+        }
+
+        pub fn offset(&self) -> usize {
+            self.offset
+        }
+
+        pub fn capacity(&self) -> usize {
+            self.buf.len()
+        }
+
+        pub fn expect_length(&self, len: usize) -> Result<(), DtlsError> {
+            if self.buf.len() - self.offset >= len {
+                Ok(())
+            } else {
+                Err(DtlsError::OutOfMemory)
+            }
+        }
+
+        // pub fn read_u8(&mut self) -> u8 {
+        //     let v = self.buf[self.offset];
+        //     self.offset += 1;
+        //     v
+        // }
+        // pub fn read_u16(&mut self) -> u16 {
+        //     let v = u16::from_be_bytes(self.buf[self.offset..self.offset + 2].try_into().unwrap());
+        //     self.offset += 2;
+        //     v
+        // }
+
+        // pub fn read_u32(&mut self) -> u32 {
+        //     let v = u32::from_be_bytes(self.buf[self.offset..self.offset + 4].try_into().unwrap());
+        //     self.offset += 4;
+        //     v
+        // }
+
+        // pub fn read_u64(&mut self) -> u64 {
+        //     let v = u64::from_be_bytes(self.buf[self.offset..self.offset + 8].try_into().unwrap());
+        //     self.offset += 8;
+        //     v
+        // }
+
+        // pub fn read_u24(&mut self) -> u32 {
+        //     let mut buf = [0; 4];
+        //     buf[1..4].copy_from_slice(&self.buf[self.offset..self.offset + 3]);
+        //     let v = u32::from_be_bytes(buf);
+        //     self.offset += 3;
+        //     v
+        // }
+
+        // pub fn read_u48(&mut self) -> u64 {
+        //     let mut buf = [0; 8];
+        //     buf[2..8].copy_from_slice(&self.buf[self.offset..self.offset + 6]);
+        //     let v = u64::from_be_bytes(buf);
+        //     self.offset += 6;
+        //     v
+        // }
+        // pub fn read_as_reference(&mut self, length: usize) -> &[u8] {
+        //     let begin = self.offset;
+        //     self.offset += length;
+        //     &self.buf[begin..self.offset]
+        // }
+
+        // pub fn read_exactly_n(&mut self, written_into: &mut [u8], n: usize) {
+        //     written_into.copy_from_slice(&self.buf[self.offset..self.offset + n]);
+        //     self.offset += n;
+        // }
+
+        // pub fn read_into<const SZ: usize>(&mut self, written_into: &mut [u8; SZ]) {
+        //     written_into.copy_from_slice(&self.buf[self.offset..self.offset + SZ]);
+        //     self.offset += SZ;
+        // }
+
+        /// Increases offset but does not write anything.
+        pub fn add_offset(&mut self, len: usize) {
+            debug_assert!(self.buf.len() >= len + self.offset);
+            self.offset += len;
+        }
+
+        pub fn truncate(&mut self, len: usize) {
+            let offset = self.offset;
+            let buf = core::mem::take(&mut self.buf);
+            *self = ParseBuffer::init_with_offset(&mut buf[..len], offset);
+        }
     }
 
-    pub fn read_into<const SZ: usize>(&mut self, written_into: &mut [u8; SZ]) {
-        written_into.copy_from_slice(&self.buf.as_ref()[self.offset..self.offset + SZ]);
-        self.offset += SZ;
+    // impl<T: AsRef<[u8]>> ParseBuffer<T> {}
+
+    impl AsMut<[u8]> for ParseBuffer<'_> {
+        fn as_mut(&mut self) -> &mut [u8] {
+            &mut self.buf[..self.offset]
+        }
     }
 
-    /// Increases offset but does not write anything.
-    pub fn add_offset(&mut self, len: usize) {
-        debug_assert!(self.buf.as_ref().len() >= len + self.offset);
-        self.offset += len;
-    }
-}
-
-impl<T: AsMut<[u8]>> AsMut<[u8]> for ParseBuffer<T> {
-    fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.buf.as_mut()[..self.offset]
-    }
-}
-
-impl<T: AsRef<[u8]>> AsRef<[u8]> for ParseBuffer<T> {
-    fn as_ref(&self) -> &[u8] {
-        &self.buf.as_ref()[..self.offset]
-    }
-}
-
-impl<T: AsMut<[u8]> + AsRef<[u8]>> Buffer for ParseBuffer<T> {
-    fn extend_from_slice(&mut self, other: &[u8]) -> aes_gcm::aead::Result<()> {
-        self.write_into(other);
-        Ok(())
+    impl AsRef<[u8]> for ParseBuffer<'_> {
+        fn as_ref(&self) -> &[u8] {
+            &self.buf[..self.offset]
+        }
     }
 
-    fn truncate(&mut self, len: usize) {
-        self.offset = len;
-    }
-}
+    impl Buffer for ParseBuffer<'_> {
+        fn extend_from_slice(&mut self, other: &[u8]) -> aes_gcm::aead::Result<()> {
+            self.write_into(other);
+            Ok(())
+        }
 
-impl<'a> ParseBuffer<&'a mut [u8]> {
-    pub fn into_ref(self) -> ParseBuffer<&'a [u8]> {
-        ParseBuffer::init_with_offset(self.buf, self.offset)
-    }
-
-    pub fn truncate(&mut self, len: usize) {
-        let offset = self.offset;
-        let buf = core::mem::take(&mut self.buf);
-        *self = ParseBuffer::init_with_offset(&mut buf[..len], offset);
-    }
-}
-
-impl Clone for ParseBuffer<&[u8]> {
-    fn clone(&self) -> Self {
-        ParseBuffer::init_with_offset(self.buf, self.offset)
+        fn truncate(&mut self, len: usize) {
+            self.offset = len;
+        }
     }
 }
 
@@ -265,14 +383,14 @@ impl HandshakeType {
 }
 
 pub struct EncodeHandshakeMessage<'a, 'b> {
-    buffer: &'a mut ParseBuffer<&'b mut [u8]>,
+    buffer: &'a mut ParseBuffer<'b>,
     len_pos: usize,
     binders_len: usize,
 }
 
 impl<'a, 'b> EncodeHandshakeMessage<'a, 'b> {
     pub fn new(
-        buffer: &'a mut ParseBuffer<&'b mut [u8]>,
+        buffer: &'a mut ParseBuffer<'b>,
         handshake_type: HandshakeType,
         handshake_seq_num: u16,
     ) -> Result<Self, DtlsError> {
@@ -290,7 +408,7 @@ impl<'a, 'b> EncodeHandshakeMessage<'a, 'b> {
         })
     }
 
-    pub fn payload_buffer<'c>(&'c mut self) -> &'c mut ParseBuffer<&'b mut [u8]> {
+    pub fn payload_buffer<'c>(&'c mut self) -> &'c mut ParseBuffer<'b> {
         self.buffer
     }
 
@@ -299,7 +417,7 @@ impl<'a, 'b> EncodeHandshakeMessage<'a, 'b> {
         binders_len: usize,
         transcript_hash: &mut CryptoInformation,
     ) {
-        let payload_len = self.buffer.offset - self.len_pos - 11;
+        let payload_len = self.buffer.offset() - self.len_pos - 11;
         self.buffer.set_u24(self.len_pos, payload_len as u32);
         self.buffer.set_u24(self.len_pos + 8, payload_len as u32);
         self.binders_len = binders_len;
@@ -314,7 +432,7 @@ impl<'a, 'b> EncodeHandshakeMessage<'a, 'b> {
         );
     }
 
-    pub fn binders_buffer(&mut self) -> ParseBuffer<&mut [u8]> {
+    pub fn binders_buffer(&mut self) -> ParseBuffer<'_> {
         let offset = self.buffer.offset();
         ParseBuffer::init(&mut self.buffer.as_mut()[offset - self.binders_len..])
     }
@@ -329,7 +447,7 @@ impl<'a, 'b> EncodeHandshakeMessage<'a, 'b> {
 
     pub fn finish(self, transcript_hash: &mut CryptoInformation) {
         debug_assert_eq!(self.binders_len, 0);
-        let payload_len = self.buffer.offset - self.len_pos - 11;
+        let payload_len = self.buffer.offset() - self.len_pos - 11;
         self.buffer.set_u24(self.len_pos, payload_len as u32);
         self.buffer.set_u24(self.len_pos + 8, payload_len as u32);
 
@@ -341,7 +459,7 @@ impl<'a, 'b> EncodeHandshakeMessage<'a, 'b> {
 }
 
 pub fn encode_client_hello(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     info: &mut HandshakeInformation,
     cipher_suites: &[CipherSuite],
     now_ms: &u64,
@@ -393,7 +511,7 @@ pub fn encode_client_hello(
 }
 
 pub fn encode_server_hello(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     rng: &mut dyn rand_core::CryptoRngCore,
     client_hello_session_id: &[u8],
     selected_cipher_suite: CipherSuite,
@@ -462,7 +580,7 @@ impl<'a> HelloRetryCookie<'a> {
 }
 
 pub fn encode_hello_retry(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     client_hello_session_id: &[u8],
     cipher_suite: CipherSuite,
     cookie: HelloRetryCookie<'_>,
@@ -501,13 +619,13 @@ pub fn encode_hello_retry(
     Ok(HandshakeType::ServerHello)
 }
 
-pub fn encode_encrypted_extensions(buffer: &mut ParseBuffer<&mut [u8]>) -> Result<(), DtlsError> {
+pub fn encode_encrypted_extensions(buffer: &mut ParseBuffer<'_>) -> Result<(), DtlsError> {
     buffer.write_u16(0);
     Ok(())
 }
 
 pub fn encode_finished(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     secret: &TrafficSecret,
     crypto_state: &mut CipherDependentCryptoState,
 ) -> Result<HandshakeType, DtlsError> {
@@ -540,10 +658,8 @@ impl TryFrom<u16> for ExtensionType {
 }
 
 pub fn encode_extension(
-    buffer: &mut ParseBuffer<&mut [u8]>,
-    encode_extension_data: &mut dyn FnMut(
-        &mut ParseBuffer<&mut [u8]>,
-    ) -> Result<ExtensionType, DtlsError>,
+    buffer: &mut ParseBuffer<'_>,
+    encode_extension_data: &mut dyn FnMut(&mut ParseBuffer<'_>) -> Result<ExtensionType, DtlsError>,
 ) -> Result<(), DtlsError> {
     let type_pos = buffer.offset();
     buffer.expect_length(2)?;
@@ -559,7 +675,7 @@ pub fn encode_extension(
 }
 
 pub fn encode_supported_versions_client(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
 ) -> Result<ExtensionType, DtlsError> {
     buffer.expect_length(3)?;
     buffer.write_u8(2);
@@ -568,7 +684,7 @@ pub fn encode_supported_versions_client(
 }
 
 pub fn encode_supported_versions_server(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
 ) -> Result<ExtensionType, DtlsError> {
     buffer.expect_length(3)?;
     buffer.write_u16(DTLS_1_3);
@@ -576,7 +692,7 @@ pub fn encode_supported_versions_server(
 }
 
 pub fn encode_pre_shared_key_client_with_empty_binders(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     psks: &[Psk<'_>],
     now_ms: &u64,
 ) -> Result<(ExtensionType, usize), DtlsError> {
@@ -613,7 +729,7 @@ pub fn encode_pre_shared_key_client_with_empty_binders(
 }
 
 pub fn encode_pre_shared_key_client_binders(
-    binders_buffer: &mut ParseBuffer<&mut [u8]>,
+    binders_buffer: &mut ParseBuffer<'_>,
     cipher_suite: Option<CipherSuite>,
     psks: &[Psk<'_>],
     transcript_hash: &mut CryptoInformation,
@@ -636,7 +752,7 @@ pub fn encode_pre_shared_key_client_binders(
 }
 
 pub fn encode_pre_shared_key_exchange_modes(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
 ) -> Result<ExtensionType, DtlsError> {
     buffer.expect_length(2)?;
     buffer.write_u8(1);
@@ -646,7 +762,7 @@ pub fn encode_pre_shared_key_exchange_modes(
 }
 
 pub fn encode_cookie(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     cookie: &[u8],
 ) -> Result<ExtensionType, DtlsError> {
     buffer.expect_length(2 + cookie.len())?;
@@ -656,7 +772,7 @@ pub fn encode_cookie(
 }
 
 pub fn create_and_encode_cookie(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     key: &[u8],
     peer_addr: &SocketAddr,
     client_hello_hash: &PskTranscriptHash,
@@ -668,7 +784,7 @@ pub fn create_and_encode_cookie(
 }
 
 pub fn encode_alert(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     description: AlertDescription,
     level: AlertLevel,
 ) -> Result<(), DtlsError> {
@@ -680,13 +796,13 @@ pub fn encode_alert(
 
 pub struct EncodeAck<'a, 'b> {
     message_start: usize,
-    buffer: &'a mut ParseBuffer<&'b mut [u8]>,
+    buffer: &'a mut ParseBuffer<'b>,
 }
 
 impl<'a, 'b> EncodeAck<'a, 'b> {
-    pub fn new(buffer: &'a mut ParseBuffer<&'b mut [u8]>) -> Result<Self, DtlsError> {
+    pub fn new(buffer: &'a mut ParseBuffer<'b>) -> Result<Self, DtlsError> {
         buffer.expect_length(2)?;
-        let message_start = buffer.offset;
+        let message_start = buffer.offset();
         buffer.write_u16(0);
         Ok(Self {
             message_start,
@@ -712,23 +828,23 @@ impl<'a, 'b> EncodeAck<'a, 'b> {
 // ##########################
 
 pub struct ParseHandshakeMessage<'a> {
-    buffer: ParseBuffer<&'a [u8]>,
+    buffer: ParseBuffer<'a>,
     message_start: usize,
 }
 
 impl<'a> ParseHandshakeMessage<'a> {
     pub fn new(
-        mut buffer: ParseBuffer<&'a [u8]>,
+        mut buffer: ParseBuffer<'a>,
     ) -> Result<(Self, HandshakeType, HandshakeSeqNum), DtlsError> {
-        buffer.expect_length(12)?;
         let start = buffer.offset();
 
+        let s = buffer.parse_slice::<12>()?;
         let handshake_type =
-            HandshakeType::from_num(buffer.read_u8()).ok_or(DtlsError::ParseError)?;
-        let length = buffer.read_u24();
-        let seq_num = buffer.read_u16();
-        parse_expect(buffer.read_u24() == 0, DtlsError::ParseError)?;
-        parse_expect(buffer.read_u24() == length, DtlsError::ParseError)?;
+            HandshakeType::from_num(s.read_u8::<0>()).ok_or(DtlsError::ParseError)?;
+        let length = s.read_u24::<1>();
+        let seq_num = s.read_u16::<4>();
+        parse_expect(s.read_u24::<6>() == 0, DtlsError::ParseError)?;
+        parse_expect(s.read_u24::<9>() == length, DtlsError::ParseError)?;
         Ok((
             ParseHandshakeMessage {
                 buffer,
@@ -739,14 +855,12 @@ impl<'a> ParseHandshakeMessage<'a> {
         ))
     }
 
-    pub fn retrieve_content_type(
-        buffer: &mut ParseBuffer<&'a mut [u8]>,
-    ) -> Result<HandshakeType, DtlsError> {
-        buffer.expect_length(1)?;
-        HandshakeType::from_num(buffer.read_u8()).ok_or(DtlsError::ParseError)
+    pub fn retrieve_content_type(buffer: &mut ParseBuffer<'a>) -> Result<HandshakeType, DtlsError> {
+        let s = buffer.parse_slice::<1>()?;
+        HandshakeType::from_num(s.read_u8::<0>()).ok_or(DtlsError::ParseError)
     }
 
-    pub fn payload_buffer<'c>(&'c mut self) -> &'c mut ParseBuffer<&'a [u8]> {
+    pub fn payload_buffer<'c>(&'c mut self) -> &'c mut ParseBuffer<'a> {
         &mut self.buffer
     }
 
@@ -757,7 +871,7 @@ impl<'a> ParseHandshakeMessage<'a> {
         transcript_hash.update_transcript_hash(&self.buffer.as_ref()[self.message_start + 12..]);
     }
 
-    pub fn abort_parsing(self) -> ParseBuffer<&'a [u8]> {
+    pub fn abort_parsing(self) -> ParseBuffer<'a> {
         self.buffer
     }
 }
@@ -768,7 +882,7 @@ pub enum ClientHelloResult {
 }
 
 pub fn parse_client_hello_first_pass(
-    buffer: &mut ParseBuffer<&[u8]>,
+    buffer: &mut ParseBuffer<'_>,
     require_cookie: bool,
     cookie_key: &[u8],
     peer_addr: &SocketAddr,
@@ -781,32 +895,32 @@ pub fn parse_client_hello_first_pass(
     buffer.add_offset(32);
 
     // if we ignore cached sessions we could ignore this field...
-    let legacy_session_len = buffer.read_u8() as usize;
-    let mut legacy_session = [0u8; 32];
-    buffer.read_exactly_n(
-        &mut legacy_session[0..legacy_session_len],
-        legacy_session_len,
-    );
+    let legacy_session_len = buffer.parse_slice::<1>()?.read_u8::<0>() as usize;
+    buffer.add_offset(legacy_session_len);
 
-    let cookie_len = buffer.read_u8();
+    let s = buffer.parse_slice::<3>()?;
+    let cookie_len = s.read_u8::<0>();
     parse_expect(
         cookie_len == 0,
         DtlsError::Alert(AlertDescription::IllegalParameter),
     )?;
 
-    let cipher_suites_len = buffer.read_u16();
+    let cipher_suites_len = s.read_u16::<1>();
     buffer.expect_length(cipher_suites_len as usize)?;
     let supported_suites = CipherSuite::all();
-    for _ in 0..cipher_suites_len / 2 {
-        let suite = CipherSuite::try_from(buffer.read_u16())?;
+
+    let mut cipher_suites = buffer.parse_slice_iter::<2>(cipher_suites_len as usize)?;
+    while let Some(s) = cipher_suites.next() {
+        let suite = CipherSuite::try_from(s.read_u16::<0>())?;
         if ctx.info.selected_cipher_suite.is_none() && supported_suites.contains(&suite) {
             ctx.info.selected_cipher_suite = Some(suite);
         }
     }
 
+    let s = buffer.parse_slice::<2>()?;
     // skip compression
-    let compression_len = buffer.read_u8();
-    let compression_method = buffer.read_u8();
+    let compression_len = s.read_u8::<0>();
+    let compression_method = s.read_u8::<1>();
     parse_expect(
         compression_len == 1 && compression_method == 0,
         DtlsError::Alert(AlertDescription::IllegalParameter),
@@ -862,7 +976,7 @@ pub fn parse_client_hello_first_pass(
 }
 
 pub fn parse_client_hello_second_pass(
-    buffer: &mut ParseBuffer<&[u8]>,
+    buffer: &mut ParseBuffer<'_>,
     info: &mut HandshakeInformation,
     client_hello_start: usize,
 ) -> Result<(), DtlsError> {
@@ -890,7 +1004,7 @@ pub fn parse_client_hello_second_pass(
                     !found_psk,
                     DtlsError::Alert(AlertDescription::IllegalParameter),
                 )?;
-                found_psk_em = parse_ch_key_exchange_modes(&mut buffer);
+                found_psk_em = parse_ch_key_exchange_modes(&mut buffer)?;
                 Ok(())
             }
             _ => {
@@ -920,18 +1034,17 @@ pub enum ServerHelloVariant {
 }
 
 pub fn parse_server_hello(
-    buffer: &mut ParseBuffer<&[u8]>,
+    buffer: &mut ParseBuffer<'_>,
     allowed_cipher_suites: &[CipherSuite],
     info: &mut HandshakeInformation,
 ) -> Result<ServerHelloVariant, DtlsError> {
-    buffer.expect_length(3 + 32)?;
-
+    let s = buffer.parse_slice::<{ 2 + 32 + 1 + 2 + 1 }>()?;
     parse_expect(
-        buffer.read_u16() == LEGACY_PROTOCOL_VERSION,
+        s.read_u16::<0>() == LEGACY_PROTOCOL_VERSION,
         DtlsError::ParseError,
     )?;
 
-    let mut variant = if buffer.read_as_reference(32) == HELLO_RETRY_RANDOM {
+    let mut variant = if s.read_as_reference::<2, 32>() == HELLO_RETRY_RANDOM {
         /*
         If a client receives a second
         HelloRetryRequest in the same connection (i.e., where the ClientHello
@@ -944,11 +1057,13 @@ pub fn parse_server_hello(
         info.received_hello_retry_request = true;
         ServerHelloVariant::HelloRetry(None)
     } else {
+        log::debug!("Server hello variant");
         ServerHelloVariant::ServerHello
     };
     // session id echo
-    parse_expect(buffer.read_u8() == 0, DtlsError::ParseError)?;
-    let cipher_suite = CipherSuite::try_from(buffer.read_u16())?;
+    parse_expect(s.read_u8::<34>() == 0, DtlsError::ParseError)?;
+
+    let cipher_suite = CipherSuite::try_from(s.read_u16::<35>())?;
     if !allowed_cipher_suites.contains(&cipher_suite) {
         /*
         A client which receives a cipher suite that was not offered MUST
@@ -975,7 +1090,7 @@ pub fn parse_server_hello(
         )?;
     }
     // legacy compression method
-    parse_expect(buffer.read_u8() == 0, DtlsError::ParseError)?;
+    parse_expect(s.read_u8::<37>() == 0, DtlsError::ParseError)?;
 
     let mut found_supported_version = false;
     let mut found_psk = false;
@@ -1026,7 +1141,7 @@ pub fn parse_server_hello(
     Ok(variant)
 }
 
-pub fn parse_encrypted_extensions(buffer: &mut ParseBuffer<&[u8]>) -> Result<(), DtlsError> {
+pub fn parse_encrypted_extensions(buffer: &mut ParseBuffer<'_>) -> Result<(), DtlsError> {
     parse_extensions(buffer, &mut |_, _| {
         Err(DtlsError::Alert(AlertDescription::UnsupportedExtension))
     })?;
@@ -1034,7 +1149,7 @@ pub fn parse_encrypted_extensions(buffer: &mut ParseBuffer<&[u8]>) -> Result<(),
 }
 
 pub fn parse_finished(
-    buffer: &mut ParseBuffer<&[u8]>,
+    buffer: &mut ParseBuffer<'_>,
     secret: &TrafficSecret,
     crypto_state: &mut CipherDependentCryptoState,
 ) -> Result<(), DtlsError> {
@@ -1046,84 +1161,81 @@ pub fn parse_finished(
 }
 
 pub fn parse_alert(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
 ) -> Result<(AlertLevel, AlertDescription), DtlsError> {
-    buffer.expect_length(2)?;
+    let s = buffer.parse_slice::<2>()?;
     Ok((
-        AlertLevel::from(buffer.read_u8()),
-        AlertDescription::from(buffer.read_u8()),
+        AlertLevel::from(s.read_u8::<0>()),
+        AlertDescription::from(s.read_u8::<1>()),
     ))
 }
 
 pub fn parse_extensions(
-    buffer: &mut ParseBuffer<&[u8]>,
-    handle_extension_data: &mut dyn FnMut(
-        ExtensionType,
-        ParseBuffer<&[u8]>,
-    ) -> Result<(), DtlsError>,
+    buffer: &mut ParseBuffer<'_>,
+    handle_extension_data: &mut dyn FnMut(ExtensionType, ParseBuffer<'_>) -> Result<(), DtlsError>,
 ) -> Result<(), DtlsError> {
-    buffer.expect_length(2)?;
-    let extensions_len = buffer.read_u16() as usize;
+    let s = buffer.parse_slice::<2>()?;
+    let extensions_len = s.read_u16::<0>() as usize;
     buffer.expect_length(extensions_len)?;
 
     let start = buffer.offset();
     while buffer.offset() < start + extensions_len {
-        buffer.expect_length(4)?;
-        let extension_type = ExtensionType::try_from(buffer.read_u16())?;
-        let extension_data_len = buffer.read_u16() as usize;
+        let s = buffer.parse_slice::<4>()?;
+        let extension_type = ExtensionType::try_from(s.read_u16::<0>())?;
+        let extension_data_len = s.read_u16::<2>() as usize;
         buffer.expect_length(extension_data_len)?;
         buffer.add_offset(extension_data_len);
+        let offset = buffer.offset();
         let sub_buffer =
-            ParseBuffer::init_with_offset(buffer.as_ref(), buffer.offset() - extension_data_len);
+            ParseBuffer::init_with_offset(buffer.as_mut(), offset - extension_data_len);
         handle_extension_data(extension_type, sub_buffer)?;
     }
 
     Ok(())
 }
 
-fn parse_supported_versions_client(buffer: &mut ParseBuffer<&[u8]>) -> Result<(), DtlsError> {
-    let mut len = buffer.read_u8();
-    buffer.expect_length(len as usize)?;
-
-    while len > 1 {
-        len -= 2;
-        let v = buffer.read_u16();
+fn parse_supported_versions_client(buffer: &mut ParseBuffer<'_>) -> Result<(), DtlsError> {
+    let len = buffer.parse_slice::<1>()?.read_u8::<0>();
+    let mut versions = buffer.parse_slice_iter::<2>(len as usize)?;
+    while let Some(s) = versions.next() {
+        let v = s.read_u16::<0>();
         if v == DTLS_1_3 {
-            buffer.add_offset(len as usize);
             return Ok(());
         }
     }
-
     Err(DtlsError::Alert(AlertDescription::IllegalParameter))
 }
 
-pub fn parse_supported_versions_server(buffer: &mut ParseBuffer<&[u8]>) -> Result<(), DtlsError> {
-    buffer.expect_length(2)?;
-    parse_expect(buffer.read_u16() == DTLS_1_3, DtlsError::ParseError)
+pub fn parse_supported_versions_server(buffer: &mut ParseBuffer<'_>) -> Result<(), DtlsError> {
+    parse_expect(
+        buffer.parse_slice::<2>()?.read_u16::<0>() == DTLS_1_3,
+        DtlsError::ParseError,
+    )
 }
 
-pub fn parse_pre_shared_key_server(buffer: &mut ParseBuffer<&[u8]>) -> Result<u16, DtlsError> {
-    buffer.expect_length(2)?;
-    Ok(buffer.read_u16())
+pub fn parse_pre_shared_key_server(buffer: &mut ParseBuffer<'_>) -> Result<u16, DtlsError> {
+    Ok(buffer.parse_slice::<2>()?.read_u16::<0>())
 }
 
 fn parse_pre_shared_key_client(
-    buffer: &mut ParseBuffer<&[u8]>,
+    buffer: &mut ParseBuffer<'_>,
     client_hello_start: usize,
     info: &mut HandshakeInformation,
 ) -> Result<(), DtlsError> {
-    let mut psk_ids_len_left = buffer.read_u16() as usize;
+    let s = buffer.parse_slice::<2>()?;
+    let mut psk_ids_len_left = s.read_u16::<0>() as usize;
     parse_expect(
         psk_ids_len_left > 0,
         DtlsError::Alert(AlertDescription::MissingExtension),
     )?;
     let cipher_suite_hash_fn = info.selected_cipher_suite.unwrap().hash_function();
     let mut selected_psk_index = 0;
+
     while psk_ids_len_left > 0 {
-        let psk_id_len = buffer.read_u16() as usize;
-        buffer.expect_length(2 + psk_id_len + 4)?;
+        let psk_id_len = buffer.parse_slice::<2>()?.read_u16::<0>() as usize;
+        // buffer.expect_length(2 + psk_id_len + 4)?;
         psk_ids_len_left -= 2 + psk_id_len;
-        let id = buffer.read_as_reference(psk_id_len);
+        let id = buffer.read_as_reference_checked(psk_id_len)?;
         if info
             .available_psks
             .iter()
@@ -1133,22 +1245,22 @@ fn parse_pre_shared_key_client(
             break;
         }
         psk_ids_len_left -= 4;
-        let _ = buffer.read_u32();
+        let _ = buffer.parse_slice::<4>()?.read_u32::<0>();
         selected_psk_index += 1;
     }
-    let binder_start = buffer.offset;
+    let binder_start = buffer.offset();
 
-    let mut binders_len_left = buffer.read_u16();
+    let mut binders_len_left = buffer.parse_slice::<2>()?.read_u16::<0>();
     let mut binder_index = 0;
     while binders_len_left > 0 {
-        let binder_len = buffer.read_u8();
-        buffer.add_offset(binder_len as usize);
-        let bind_entry = &buffer.as_ref()[buffer.offset - binder_len as usize..buffer.offset];
+        let binder_len = buffer.parse_slice::<1>()?.read_u8::<0>() as usize;
+        buffer.add_offset(binder_len);
+        let bind_entry = buffer.slice_checked(buffer.offset() - binder_len..buffer.offset())?;
         binders_len_left -= 1 + binder_len as u16;
 
         if selected_psk_index == binder_index {
             let partial_client_hello =
-                &buffer.complete_inner_buffer()[client_hello_start - 12..binder_start];
+                &buffer.slice_checked(client_hello_start - 12..binder_start)?;
             let (header, client_hello) = partial_client_hello.split_at(12);
             let transcript_hash: &mut PskTranscriptHash = info.crypto.psk_hash_mut()?;
             let finalized_hash = transcript_hash.finalize(&[&header[0..4], client_hello]);
@@ -1171,16 +1283,17 @@ fn parse_pre_shared_key_client(
     Ok(())
 }
 
-fn parse_ch_key_exchange_modes(buffer: &mut ParseBuffer<&[u8]>) -> bool {
-    let modes = buffer.read_u8();
+fn parse_ch_key_exchange_modes(buffer: &mut ParseBuffer<'_>) -> Result<bool, DtlsError> {
+    let modes_len = buffer.parse_slice::<1>()?.read_u8::<0>();
     let mut found_psk_em = false;
-    for _ in 0..modes {
-        let mode = buffer.read_u8();
+    let mut modes = buffer.parse_slice_iter::<1>(modes_len as usize)?;
+    while let Some(s) = modes.next() {
+        let mode = s.read_u8::<0>();
         if mode == 0 {
             found_psk_em = true;
         }
     }
-    found_psk_em
+    Ok(found_psk_em)
 }
 
 pub struct Cookie {
@@ -1188,39 +1301,28 @@ pub struct Cookie {
     pub len: usize,
 }
 
-pub fn parse_cookie(buffer: &mut ParseBuffer<&[u8]>) -> Result<Cookie, DtlsError> {
-    buffer.expect_length(2)?;
-    let len = buffer.read_u16() as usize;
+pub fn parse_cookie(buffer: &mut ParseBuffer<'_>) -> Result<Cookie, DtlsError> {
+    let len = buffer.parse_slice::<2>()?.read_u16::<0>() as usize;
     let index = buffer.offset();
     buffer.expect_length(len)?;
     buffer.add_offset(len);
     Ok(Cookie { index, len })
 }
 
-pub struct ParseAck<'a, 'b> {
-    buffer: &'a mut ParseBuffer<&'b [u8]>,
-    left_entries: u16,
+pub struct ParseAck<'a> {
+    stepper: Stepper<'a, 16>,
 }
 
-impl<'a, 'b> ParseAck<'a, 'b> {
-    pub fn new(buffer: &'a mut ParseBuffer<&'b [u8]>) -> Result<Self, DtlsError> {
-        buffer.expect_length(2)?;
-        let len = buffer.read_u16();
-        parse_expect(len % 16 == 0, DtlsError::ParseError)?;
-        buffer.expect_length(len as usize)?;
-        let left_entries = len / 16;
+impl<'a> ParseAck<'a> {
+    pub fn new(buffer: &'a mut ParseBuffer<'_>) -> Result<Self, DtlsError> {
+        let len = buffer.parse_slice::<2>()?.read_u16::<0>();
         Ok(Self {
-            buffer,
-            left_entries,
+            stepper: buffer.parse_slice_iter(len as usize)?,
         })
     }
 
     pub fn next_entry(&mut self) -> Option<(u64, u64)> {
-        if self.left_entries > 0 {
-            self.left_entries -= 1;
-            Some((self.buffer.read_u64(), self.buffer.read_u64()))
-        } else {
-            None
-        }
+        let s = self.stepper.next()?;
+        Some((s.read_u64::<0>(), s.read_u64::<8>()))
     }
 }

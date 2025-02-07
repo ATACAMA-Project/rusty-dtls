@@ -5,7 +5,7 @@ use log::{debug, error, trace, warn};
 #[cfg(feature = "async")]
 use crate::asynchronous::SocketAndAddr;
 
-type EncodeData<'a> = &'a mut dyn FnMut(&mut ParseBuffer<&mut [u8]>) -> Result<(), DtlsError>;
+type EncodeData<'a> = &'a mut dyn FnMut(&mut ParseBuffer<'_>) -> Result<(), DtlsError>;
 
 use crate::{
     parsing::ParseBuffer,
@@ -118,10 +118,7 @@ impl<'a> BufferMessageQueue<'a> {
         &mut self,
         epoch: EpochShort,
         now_ms: &TimeStampMs,
-        encode_data: &mut dyn FnMut(
-            &mut ParseBuffer<&mut [u8]>,
-            Option<&[u8]>,
-        ) -> Result<(), DtlsError>,
+        encode_data: &mut dyn FnMut(&mut ParseBuffer<'_>, Option<&[u8]>) -> Result<(), DtlsError>,
     ) -> Result<usize, DtlsError> {
         if let Some(cookie) = self.cookie.take() {
             let len_size = size_of::<usize>();
@@ -227,7 +224,7 @@ impl<'a> BufferMessageQueue<'a> {
         None
     }
 
-    pub fn get_handshake_buffer(&self, index: usize) -> Result<ParseBuffer<&[u8]>, DtlsError> {
+    pub fn get_handshake_buffer(&mut self, index: usize) -> Result<ParseBuffer<'_>, DtlsError> {
         let Some(Entry::Reordering(ReorderingEntry {
             handshake_data: record_data,
             seq_num: _,
@@ -236,7 +233,7 @@ impl<'a> BufferMessageQueue<'a> {
             error!("Used invalid index!");
             return Err(DtlsError::IllegalInnerState);
         };
-        Ok(ParseBuffer::init(record_data.to_slice(self.buffer)))
+        Ok(ParseBuffer::init(record_data.into_slice_mut(self.buffer)))
     }
 
     pub fn free_entry_by_index(&mut self, index: usize) {
@@ -458,6 +455,10 @@ struct Slice {
 impl Slice {
     fn to_slice(self, buffer: &[u8]) -> &[u8] {
         &buffer[self.index..self.index + self.len]
+    }
+
+    fn into_slice_mut(self, buffer: &mut [u8]) -> &mut [u8] {
+        &mut buffer[self.index..self.index + self.len]
     }
 }
 

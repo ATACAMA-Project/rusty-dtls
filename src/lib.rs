@@ -453,7 +453,7 @@ fn try_open_new_handshake<'a>(
             unreachable!()
         };
         let Ok((mut client_hello, HandshakeType::ClientHello, client_hello_seq_num @ (0 | 1))) =
-            ParseHandshakeMessage::new(packet_buffer.into_ref())
+            ParseHandshakeMessage::new(packet_buffer)
         else {
             break;
         };
@@ -673,7 +673,7 @@ impl<'a> HandshakeSlot<'a> {
 fn try_unpack_record<'a>(
     packet: &'a mut [u8],
     viable_epochs: &mut [EpochState],
-) -> Result<Option<(RecordContentType, ParseBuffer<&'a mut [u8]>)>, DtlsError> {
+) -> Result<Option<(RecordContentType, ParseBuffer<'a>)>, DtlsError> {
     let mut packet_buffer = ParseBuffer::init(packet);
     let res = parse_record(&mut packet_buffer, viable_epochs);
 

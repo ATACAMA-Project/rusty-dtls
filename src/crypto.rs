@@ -145,7 +145,7 @@ impl AsRef<[u8]> for FinalizedPskTranscriptHash {
 }
 
 pub fn encode_cookie(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     key: &[u8],
     hash: &PskTranscriptHash,
     peer_addr: &SocketAddr,
@@ -287,7 +287,7 @@ pub fn aead_encrypt_in_place(
     secret: &TrafficSecret,
     record_seq_num: &u64,
     additional_data: &[u8],
-    plaintext: &mut ParseBuffer<&mut [u8]>,
+    plaintext: &mut ParseBuffer<'_>,
 ) -> Result<(), DtlsError> {
     match secret {
         #[cfg(feature = "aes128gcm_sha256")]
@@ -457,7 +457,7 @@ impl CipherDependentCryptoState {
 
     pub fn encode_verify_data(
         &mut self,
-        buffer: &mut ParseBuffer<&mut [u8]>,
+        buffer: &mut ParseBuffer<'_>,
         secret: &TrafficSecret,
     ) -> Result<(), DtlsError> {
         match (self, secret) {
@@ -485,7 +485,7 @@ impl CipherDependentCryptoState {
 
     pub fn check_verify_data(
         &mut self,
-        buffer: &mut ParseBuffer<&[u8]>,
+        buffer: &mut ParseBuffer<'_>,
         secret: &TrafficSecret,
     ) -> Result<bool, DtlsError> {
         match (self, secret) {
@@ -570,7 +570,7 @@ fn digest_client_hello_1_hash(hash: &mut dyn Update, client_hello_1_hash: &[u8])
 }
 
 fn encode_verify_data<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     traffic_secret: &[u8],
     transcript_hash: &[u8],
 ) -> Result<(), DtlsError> {
@@ -580,7 +580,7 @@ fn encode_verify_data<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
 }
 
 fn check_verify_data<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
-    buffer: &mut ParseBuffer<&[u8]>,
+    buffer: &mut ParseBuffer<'_>,
     traffic_secret: &[u8],
     transcript_hash: &[u8],
 ) -> Result<bool, DtlsError> {
@@ -624,7 +624,7 @@ pub fn validate_binder(
 }
 
 pub fn encode_binder_entry(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     psk: &Psk,
     transcript_hash: &[u8],
 ) -> Result<(), DtlsError> {
@@ -680,7 +680,7 @@ fn encrypt_in_place<A: KeyInit + AeadInPlace>(
     iv: &[u8],
     record_seq_num: &u64,
     additional_data: &[u8],
-    plaintext: &mut ParseBuffer<&mut [u8]>,
+    plaintext: &mut ParseBuffer<'_>,
 ) -> Result<(), DtlsError> {
     let mut nonce = GenericArray::default();
     generate_nonce(record_seq_num, iv, nonce.as_mut_slice());

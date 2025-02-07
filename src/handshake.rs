@@ -330,11 +330,12 @@ pub fn handle_handshake_message_client(
     record_queue: &mut RecordQueue<'_>,
     conn: &mut DtlsConnection,
     content_type: RecordContentType,
-    message: ParseBuffer<&mut [u8]>,
+    message: ParseBuffer<'_>,
 ) -> Result<(), DtlsError> {
     let mut cookie = None;
-    let message = message.into_ref();
-    let buf = message.clone();
+    let offset = message.offset();
+    let message_buf = message.release_buffer();
+    let message = ParseBuffer::init_with_offset(message_buf, offset);
     handle_handshake_message(
         ctx,
         record_queue,
@@ -345,6 +346,8 @@ pub fn handle_handshake_message_client(
             Ok(())
         },
     )?;
+
+    let message = ParseBuffer::init_with_offset(message_buf, offset);
     if matches!(
         *state,
         ClientState::ReceivedHelloRetry | ClientState::WaitEncryptedExtensions
@@ -353,7 +356,7 @@ pub fn handle_handshake_message_client(
     }
     if let Some(cookie) = cookie {
         record_queue
-            .store_cookie(&buf.complete_inner_buffer()[cookie.index..cookie.index + cookie.len])?;
+            .store_cookie(message.slice_checked(cookie.index..cookie.index + cookie.len)?)?;
     }
     Ok(())
 }
@@ -362,7 +365,7 @@ fn handle_handshake_message(
     ctx: &mut HandshakeContext,
     record_queue: &mut RecordQueue<'_>,
     content_type: RecordContentType,
-    message: ParseBuffer<&[u8]>,
+    message: ParseBuffer<'_>,
     handle: &mut dyn FnMut(
         &mut HandshakeInformation,
         HandshakeType,
@@ -392,7 +395,7 @@ fn handle_handshake_message(
 
 fn try_unpack_handshake_message<'b>(
     content_type: RecordContentType,
-    mut message: ParseBuffer<&'b [u8]>,
+    mut message: ParseBuffer<'b>,
     ctx: &mut HandshakeContext,
     record_queue: &mut RecordQueue<'_>,
 ) -> Result<Option<(ParseHandshakeMessage<'b>, HandshakeType)>, DtlsError> {
@@ -422,7 +425,8 @@ fn try_unpack_handshake_message<'b>(
             );
             let res = record_queue.alloc_reordering_entry(seq_num, &mut |buf| {
                 buf.expect_length(message.capacity())?;
-                buf.write_into(&message.complete_inner_buffer()[message_start..]);
+                let message_end = message.capacity();
+                buf.write_into(message.slice_checked(message_start..message_end)?);
                 Ok(())
             });
             match res {
@@ -587,13 +591,13 @@ pub fn handle_handshake_message_server(
     record_queue: &mut RecordQueue<'_>,
     conn: &mut DtlsConnection,
     content_type: RecordContentType,
-    message: ParseBuffer<&mut [u8]>,
+    message: ParseBuffer<'_>,
 ) -> Result<(), DtlsError> {
     handle_handshake_message(
         ctx,
         record_queue,
         content_type,
-        message.into_ref(),
+        message,
         &mut |info, handshake_type, handshake| {
             receive_server(state, info, conn, handshake_type, handshake)
         },
