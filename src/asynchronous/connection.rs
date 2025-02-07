@@ -28,7 +28,7 @@ pub(crate) struct SocketAndAddr<'a, Socket: embedded_nal_async::UnconnectedUdp> 
     pub(crate) remote: &'a SocketAddr,
 }
 
-impl<'a, Socket: embedded_nal_async::UnconnectedUdp> SocketAndAddr<'a, Socket> {
+impl<Socket: embedded_nal_async::UnconnectedUdp> SocketAndAddr<'_, Socket> {
     pub async fn send(&mut self, data: &[u8]) -> Result<(), DtlsError> {
         self.socket
             .send(*self.local, *self.remote, data)
@@ -209,8 +209,7 @@ where
                 &connection.epochs[epoch_index],
                 &connection.current_epoch,
             )?;
-            record.payload_buffer().expect_length(packet.len())?;
-            record.payload_buffer().write_into(packet);
+            record.payload_buffer().write_slice_checked(packet)?;
             record.finish(
                 &mut connection.epochs[epoch_index],
                 RecordContentType::ApplicationData,

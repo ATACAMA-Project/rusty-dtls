@@ -1,11 +1,11 @@
-use core::{borrow::BorrowMut, mem::size_of};
+use core::borrow::BorrowMut;
 
 use log::{debug, error, trace, warn};
 
 #[cfg(feature = "async")]
 use crate::asynchronous::SocketAndAddr;
 
-type EncodeData<'a> = &'a mut dyn FnMut(&mut ParseBuffer<&mut [u8]>) -> Result<(), DtlsError>;
+type EncodeData<'a> = &'a mut dyn FnMut(&mut ParseBuffer<'_>) -> Result<(), DtlsError>;
 
 use crate::{
     parsing::ParseBuffer,
@@ -118,10 +118,7 @@ impl<'a> BufferMessageQueue<'a> {
         &mut self,
         epoch: EpochShort,
         now_ms: &TimeStampMs,
-        encode_data: &mut dyn FnMut(
-            &mut ParseBuffer<&mut [u8]>,
-            Option<&[u8]>,
-        ) -> Result<(), DtlsError>,
+        encode_data: &mut dyn FnMut(&mut ParseBuffer<'_>, Option<&[u8]>) -> Result<(), DtlsError>,
     ) -> Result<usize, DtlsError> {
         if let Some(cookie) = self.cookie.take() {
             let len_size = size_of::<usize>();
@@ -227,7 +224,7 @@ impl<'a> BufferMessageQueue<'a> {
         None
     }
 
-    pub fn get_handshake_buffer(&self, index: usize) -> Result<ParseBuffer<&[u8]>, DtlsError> {
+    pub fn get_handshake_buffer(&mut self, index: usize) -> Result<ParseBuffer<'_>, DtlsError> {
         let Some(Entry::Reordering(ReorderingEntry {
             handshake_data: record_data,
             seq_num: _,
@@ -236,7 +233,7 @@ impl<'a> BufferMessageQueue<'a> {
             error!("Used invalid index!");
             return Err(DtlsError::IllegalInnerState);
         };
-        Ok(ParseBuffer::init(record_data.to_slice(self.buffer)))
+        Ok(ParseBuffer::init(record_data.into_slice_mut(self.buffer)))
     }
 
     pub fn free_entry_by_index(&mut self, index: usize) {
@@ -264,11 +261,7 @@ impl<'a> BufferMessageQueue<'a> {
 
     pub fn store_cookie(&mut self, cookie: &[u8]) -> Result<(), DtlsError> {
         print_bytes!("Store Cookie:", cookie);
-        self.cookie = Some(self.alloc_data(&mut |b| {
-            b.expect_length(cookie.len())?;
-            b.write_into(cookie);
-            Ok(())
-        })?);
+        self.cookie = Some(self.alloc_data(&mut |b| b.write_slice_checked(cookie))?);
         Ok(())
     }
 
@@ -278,8 +271,10 @@ impl<'a> BufferMessageQueue<'a> {
 
     fn free_data(&mut self, data: &Slice) {
         let Slice { index, len } = data;
+        let len_size = size_of::<usize>();
+        let flag_size = 1;
 
-        if self.buffer_pos == index + len {
+        if self.buffer_pos == index + len + len_size + flag_size {
             self.buffer_pos = *index;
             let len_size = size_of::<usize>();
             while self.buffer_pos > len_size + 1 && self.buffer[self.buffer_pos - 1] == 0 {
@@ -288,7 +283,7 @@ impl<'a> BufferMessageQueue<'a> {
                         .try_into()
                         .expect("size_of works"),
                 );
-                self.buffer_pos -= (len + size_of::<usize>() + 1).min(self.buffer_pos);
+                self.buffer_pos -= (len + len_size + flag_size).min(self.buffer_pos);
             }
         } else {
             self.buffer[index + len] = 0;
@@ -306,10 +301,11 @@ impl<'a> BufferMessageQueue<'a> {
             let entry = self.message_queue.iter_mut().nth(i).unwrap();
             if matches!(entry, Entry::Retransmission(_)) {
                 let entry = &entry.take();
-                self.free_entry(entry);
+                self.free_data(entry.record_data_raw());
             }
             i += 1;
         }
+        self.clean_entries();
     }
 
     pub fn reset(&mut self) {
@@ -409,8 +405,7 @@ fn send_entry<'a>(
     if entry.epoch > 1 {
         let mut record =
             EncodeCiphertextRecord::new(&mut buffer, epoch_state, &(entry.epoch as u64))?;
-        record.payload_buffer().expect_length(slice.len())?;
-        record.payload_buffer().write_into(slice);
+        record.payload_buffer().write_slice_checked(slice)?;
         record.finish(epoch_state, RecordContentType::DtlsHandshake)?;
     } else {
         let mut record = EncodePlaintextRecord::new(
@@ -418,8 +413,7 @@ fn send_entry<'a>(
             RecordContentType::DtlsHandshake,
             epoch_state.send_record_seq_num,
         )?;
-        record.payload_buffer().expect_length(slice.len())?;
-        record.payload_buffer().write_into(slice);
+        record.payload_buffer().write_slice_checked(slice)?;
         record.finish();
         epoch_state.send_record_seq_num += 1;
     }
@@ -460,6 +454,10 @@ impl Slice {
     fn to_slice(self, buffer: &[u8]) -> &[u8] {
         &buffer[self.index..self.index + self.len]
     }
+
+    fn into_slice_mut(self, buffer: &mut [u8]) -> &mut [u8] {
+        &mut buffer[self.index..self.index + self.len]
+    }
 }
 
 struct ReorderingEntry {
@@ -498,5 +496,31 @@ impl RetransmissionEntry {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BufferMessageQueue;
+
+    #[test]
+    fn test_alloc_and_free() {
+        let _ = simple_logger::SimpleLogger::new().init();
+        let mut b = [0; 19];
+        let mut bq = BufferMessageQueue::new(&mut b);
+        let slice = bq
+            .alloc_data(&mut |b| {
+                b.expect_length(10)?;
+                b.add_offset(10);
+                Ok(())
+            })
+            .unwrap();
+        bq.free_data(&slice);
+        bq.alloc_data(&mut |b| {
+            b.expect_length(10)?;
+            b.add_offset(10);
+            Ok(())
+        })
+        .unwrap();
     }
 }

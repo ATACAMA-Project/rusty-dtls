@@ -95,6 +95,7 @@ pub trait HandshakeHeader {
     }
 
     fn as_bytes(&self) -> &[u8];
+    fn as_bytes_mut(&mut self) -> &mut [u8];
 
     /// length of header + message
     fn len(&self) -> usize {
@@ -110,6 +111,9 @@ pub struct ServerHello {
 impl HandshakeHeader for ServerHello {
     fn as_bytes(&self) -> &[u8] {
         &self.data
+    }
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.data
     }
 }
 
@@ -130,6 +134,9 @@ impl HandshakeHeader for EncryptedExtensions {
     fn as_bytes(&self) -> &[u8] {
         &self.data
     }
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
 }
 
 pub struct ClientHello {
@@ -141,6 +148,9 @@ pub struct ClientHello {
 impl HandshakeHeader for ClientHello {
     fn as_bytes(&self) -> &[u8] {
         &self.data
+    }
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.data
     }
 }
 
@@ -160,6 +170,9 @@ pub struct Finished {
 impl HandshakeHeader for Finished {
     fn as_bytes(&self) -> &[u8] {
         &self.data
+    }
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.data
     }
 }
 
@@ -186,8 +199,8 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
         epoch_states: &mut [EpochState],
         epoch: EpochShort,
     ) -> Result<&'a [u8], DtlsError> {
-        let message_buffer = self.msg.as_bytes();
         let mut buffer = ParseBuffer::init(stage_buffer);
+        let slice = &self.msg.as_bytes()[..self.msg.len()];
         debug_assert!(epoch >= self.epoch && epoch - self.epoch < 4);
         let epoch_state = &mut epoch_states[self.epoch as usize & 3];
         self.seq_num = epoch_state
@@ -197,10 +210,7 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
         if self.epoch > 1 {
             let mut record =
                 EncodeCiphertextRecord::new(&mut buffer, epoch_state, &(self.epoch as u64))?;
-            record.payload_buffer().expect_length(self.msg.len())?;
-            record
-                .payload_buffer()
-                .write_into(&message_buffer[..self.msg.len()]);
+            record.payload_buffer().write_slice_checked(slice)?;
             record.finish(epoch_state, RecordContentType::DtlsHandshake)?;
         } else {
             let mut record = EncodePlaintextRecord::new(
@@ -208,10 +218,7 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
                 RecordContentType::DtlsHandshake,
                 epoch_state.send_record_seq_num,
             )?;
-            record.payload_buffer().expect_length(self.msg.len())?;
-            record
-                .payload_buffer()
-                .write_into(&message_buffer[..self.msg.len()]);
+            record.payload_buffer().write_slice_checked(slice)?;
             record.finish();
             epoch_state.send_record_seq_num += 1;
         }
@@ -288,7 +295,7 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
     }
 }
 
-type EncodeData<'a> = &'a mut dyn FnMut(&mut ParseBuffer<&mut [u8]>) -> Result<(), DtlsError>;
+type EncodeData<'a> = &'a mut dyn FnMut(&mut ParseBuffer<'_>) -> Result<(), DtlsError>;
 
 impl NetQueue {
     pub fn new() -> Self {
@@ -514,11 +521,7 @@ impl NetQueue {
             error!("[NetQueue] in not in state ClientResend ClientHello");
             return Err(DtlsError::IllegalInnerState);
         };
-        let len = alloc_data(&mut rt.msg.cookie.data, &mut |b| {
-            b.expect_length(cookie.len())?;
-            b.write_into(cookie);
-            Ok(())
-        })?;
+        let len = alloc_data(&mut rt.msg.cookie.data, &mut |b| b.write_slice_checked(cookie))?;
         rt.msg.cookie.len = len;
         Ok(())
     }
@@ -528,7 +531,7 @@ impl NetQueue {
         epoch: EpochShort,
         now_ms: &TimeStampMs,
         encode_data: &mut dyn FnMut(
-            &mut ParseBuffer<&mut [u8]>,
+            &mut ParseBuffer,
             Option<&[u8]>,
         ) -> Result<(), DtlsError>,
     ) -> Result<(), DtlsError> {

@@ -145,7 +145,7 @@ struct DtlsConnection<'a> {
     p: PhantomData<&'a ()>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DtlsPoll {
     /// Wait at most until a new message has arrived or the timeout has elapsed before
     /// calling [`poll`] again.
@@ -453,7 +453,7 @@ fn try_open_new_handshake<'a>(
             unreachable!()
         };
         let Ok((mut client_hello, HandshakeType::ClientHello, client_hello_seq_num @ (0 | 1))) =
-            ParseHandshakeMessage::new(packet_buffer.into_ref())
+            ParseHandshakeMessage::new(packet_buffer)
         else {
             break;
         };
@@ -604,13 +604,6 @@ pub enum HandshakeState {
     Server(ServerState),
 }
 
-// pub enum HandshakeSlot<'a> {
-//     Client(ClientState, HandshakeContext<'a>),
-//     Server(ServerState, HandshakeContext<'a>),
-//     Finished(ConnectionId, &'a mut [u8], &'a [Psk<'a>]),
-//     Empty(&'a mut [u8], &'a [Psk<'a>]),
-// }
-
 impl<'a> HandshakeSlot<'a> {
     pub fn new(available_psks: &'a [Psk<'a>], net_queue: &'a mut NetQueue) -> Self {
         HandshakeSlot {
@@ -680,7 +673,7 @@ impl<'a> HandshakeSlot<'a> {
 fn try_unpack_record<'a>(
     packet: &'a mut [u8],
     viable_epochs: &mut [EpochState],
-) -> Result<Option<(RecordContentType, ParseBuffer<&'a mut [u8]>)>, DtlsError> {
+) -> Result<Option<(RecordContentType, ParseBuffer<'a>)>, DtlsError> {
     let mut packet_buffer = ParseBuffer::init(packet);
     let res = parse_record(&mut packet_buffer, viable_epochs);
 

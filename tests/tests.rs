@@ -7,7 +7,8 @@ use std::{
     time::Duration,
 };
 
-use rusty_dtls::{HandshakeSlot, HashFunction, Psk, NetQueue};
+use rand::{RngCore, SeedableRng};
+use rusty_dtls::{HandshakeSlot, HashFunction, NetQueue, Psk};
 
 #[cfg(not(feature = "async"))]
 use {
@@ -20,9 +21,18 @@ use {embedded_nal_async::UdpStack, std::net::Ipv4Addr};
 
 use log::{debug, info};
 
+/// CH + Cookie + management info: (1B Flag, 8B Length)
+
+#[derive(Clone, Copy)]
+pub enum HeaderUpdate {
+    NewLength(u16),
+}
+
 #[derive(Clone, Copy)]
 pub enum Action {
     Drop,
+    BitFlip(usize),
+    UpatePlaintextHeader(HeaderUpdate),
     Store,
     SendStored,
     Duplicate,
@@ -34,10 +44,20 @@ impl Action {
         proxy: &mut Proxy,
         addr: &SocketAddr,
         recv_addr: &SocketAddr,
-        recv_buf: &[u8],
+        recv_buf: &mut [u8],
     ) -> bool {
         match self {
             Action::SendStored => panic!(),
+            Action::BitFlip(pos) => {
+                debug!("Flip bit {} in {addr:?} => {recv_addr:?}", pos);
+                recv_buf[pos / 8] ^= 1 << (7 - (pos % 8));
+                false
+            }
+            Action::UpatePlaintextHeader(HeaderUpdate::NewLength(len)) => {
+                debug!("Update length to {} in {addr:?} => {recv_addr:?}", len);
+                recv_buf[11..=12].copy_from_slice(&len.to_be_bytes());
+                false
+            }
             Action::Drop => {
                 debug!("Drop {addr:?} => {recv_addr:?}");
                 true
@@ -166,20 +186,22 @@ impl Proxy {
                         self.allowed_client_msgs -= 1;
                         self.client_action_index += 1;
                         if let Some(action) = client_action {
-                            if action.run(&mut self, &addr, &recv_addr, &buffer[..read]) {
+                            if action.run(&mut self, &addr, &recv_addr, &mut buffer[..read]) {
                                 continue;
                             }
                         }
+                        debug!("Forwarding {addr:?} => {recv_addr:?} {read}");
                         self.socket.send_to(&buffer[..read], recv_addr).unwrap();
                     } else if addr == self.server {
                         let recv_addr = self.client;
                         self.allowed_server_msgs -= 1;
                         self.server_action_index += 1;
                         if let Some(action) = server_action {
-                            if action.run(&mut self, &addr, &recv_addr, &buffer[..read]) {
+                            if action.run(&mut self, &addr, &recv_addr, &mut buffer[..read]) {
                                 continue;
                             }
                         }
+                        debug!("Forwarding {addr:?} => {recv_addr:?} {read}");
                         self.socket.send_to(&buffer[..read], recv_addr).unwrap();
                     } else {
                         panic!()
@@ -214,7 +236,11 @@ async fn run_handshake_async(
 
     let mut net_queue = NetQueue::new();
     let mut staging_buffer = [0; 256];
-    let mut rand = rand::thread_rng();
+
+    let seed = rand::thread_rng().next_u64();
+    info!("[{own_port}] Using seed {seed}");
+    let mut rand = rand::rngs::StdRng::seed_from_u64(seed);
+
     let psks = [Psk::new(&[123], &[1, 2, 3, 4, 5], HashFunction::Sha256)];
 
     let delay = linux_embedded_hal::Delay;
@@ -280,6 +306,8 @@ async fn run_handshake_async(
 
 #[cfg(not(feature = "async"))]
 fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_data: bool) {
+    use log::error;
+
     let socket = Mutex::new(UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], own_port))).unwrap());
     let mut send_to_peer = |addr: &SocketAddr, buf: &[u8]| {
         debug!("[{own_port}] Send message. Size: {}", buf.len());
@@ -297,7 +325,11 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
 
     let mut net_queue = NetQueue::new();
     let mut staging_buffer = [0; 200];
-    let mut rand = rand::thread_rng();
+
+    let seed = rand::thread_rng().next_u64();
+    info!("[{own_port}] Using seed {seed}");
+    let mut rand = rand::rngs::StdRng::seed_from_u64(seed);
+
     let psks = [Psk::new(&[123], &[1, 2, 3, 4, 5], HashFunction::Sha256)];
     let mut stack =
         DtlsStack::<10>::new(&mut rand, &mut staging_buffer, &mut send_to_peer).unwrap();
@@ -316,6 +348,9 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
     let start = Instant::now();
     loop {
         let poll = stack.poll(&mut handshakes, start.elapsed().as_millis() as u64);
+        if poll.is_err() {
+            error!("[{own_port}] PollErr: {poll:?}");
+        }
         assert!(poll.is_ok());
         let poll = poll.unwrap();
         match poll {
@@ -413,7 +448,7 @@ fn handshake_test(proxy: Proxy, send_app_data: bool) {
 }
 
 #[cfg(not(feature = "async"))]
-fn handshake_test(mut proxy: Proxy, server_send_app_data: bool) {
+fn handshake_test(proxy: Proxy, server_send_app_data: bool) {
     let _ = simple_logger::SimpleLogger::new()
         .with_level(log::LevelFilter::Debug)
         .init();
@@ -437,18 +472,20 @@ fn handshake_test(mut proxy: Proxy, server_send_app_data: bool) {
     proxy.stop();
 }
 
-#[test]
-fn simple_handshake() {
-    let mut proxy = Proxy::new();
-    proxy.max_client_msgs(4).max_server_msgs(5);
-    handshake_test(proxy, false)
-}
-
 const C_MSGS_DFLT: u16 = 4;
 const S_MSGS_DFLT: u16 = 5;
 
 #[test]
-fn reorder_encrypted_extensions_hello() {
+fn simple_handshake() {
+    let mut proxy = Proxy::new();
+    proxy
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT);
+    handshake_test(proxy, false)
+}
+
+#[test]
+fn reorder_encrypted_extensions() {
     let mut proxy = Proxy::new();
     proxy
         .server_action(2, Action::Store)
@@ -460,7 +497,7 @@ fn reorder_encrypted_extensions_hello() {
 }
 
 #[test]
-fn lost_client_1_hello() {
+fn lost_client_hello_1() {
     let mut proxy = Proxy::new();
     proxy
         .client_action(0, Action::Drop)
@@ -470,7 +507,7 @@ fn lost_client_1_hello() {
 }
 
 #[test]
-fn lost_client_1_hello_multiple_times() {
+fn lost_client_hello_1_multiple_times() {
     let mut proxy = Proxy::new();
     proxy
         .client_action(0, Action::Drop)
@@ -482,7 +519,7 @@ fn lost_client_1_hello_multiple_times() {
 }
 
 #[test]
-fn lost_hello_retry_hello() {
+fn lost_hello_retry() {
     let mut proxy = Proxy::new();
     proxy
         .server_action(0, Action::Drop)
@@ -493,7 +530,7 @@ fn lost_hello_retry_hello() {
 }
 
 #[test]
-fn lost_client_2_hello() {
+fn lost_client_hello_2() {
     let mut proxy = Proxy::new();
     proxy
         .client_action(1, Action::Drop)
@@ -502,7 +539,6 @@ fn lost_client_2_hello() {
 
     handshake_test(proxy, false)
 }
-
 #[test]
 fn lost_server_hello() {
     let mut proxy = Proxy::new();
@@ -562,5 +598,48 @@ fn implicit_ack_using_app_data() {
         .server_action(4, Action::Drop)
         .max_client_msgs(C_MSGS_DFLT)
         .max_server_msgs(S_MSGS_DFLT + 1);
-    handshake_test(proxy, true)
+    handshake_test(proxy, true);
+}
+
+#[test]
+fn encrypted_extensions_header_bitflip() {
+    let mut proxy = Proxy::new();
+    proxy
+        .server_action(2, Action::BitFlip(0)) // Make the client think its not a EncryptedRecord
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT + 3);
+    handshake_test(proxy, false)
+}
+
+#[test]
+fn encrypted_extensions_payload_bitflip() {
+    let mut proxy = Proxy::new();
+    proxy
+        .server_action(2, Action::BitFlip(5 * 8)) // Make the client think its not a EncryptedRecord
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT + 3);
+    handshake_test(proxy, false)
+}
+
+#[test]
+fn client_hello_1_manip_length_to_long() {
+    let mut proxy = Proxy::new();
+    proxy
+        .client_action(
+            0,
+            Action::UpatePlaintextHeader(HeaderUpdate::NewLength(200)),
+        )
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT);
+    handshake_test(proxy, false);
+}
+
+#[test]
+fn client_hello_1_manip_length_to_short() {
+    let mut proxy = Proxy::new();
+    proxy
+        .client_action(0, Action::UpatePlaintextHeader(HeaderUpdate::NewLength(20)))
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT);
+    handshake_test(proxy, false);
 }

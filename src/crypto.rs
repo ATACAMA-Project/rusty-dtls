@@ -145,15 +145,14 @@ impl AsRef<[u8]> for FinalizedPskTranscriptHash {
 }
 
 pub fn encode_cookie(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     key: &[u8],
     hash: &PskTranscriptHash,
     peer_addr: &SocketAddr,
 ) -> Result<(), DtlsError> {
     let hash = hash.finalize(&[]);
     let start = buffer.offset();
-    buffer.expect_length(hash.as_ref().len())?;
-    buffer.write_into(hash.as_ref());
+    buffer.write_slice_checked(hash.as_ref())?;
     let mut hmac =
         <SimpleHmac<Sha256> as KeyInit>::new_from_slice(key).map_err(|_| DtlsError::CryptoError)?;
     Mac::update(&mut hmac, hash.as_ref());
@@ -162,8 +161,7 @@ pub fn encode_cookie(
         IpAddr::V6(i) => Mac::update(&mut hmac, &i.to_bits().to_be_bytes()),
     }
     let mac = hmac.finalize_fixed();
-    buffer.expect_length(mac.len())?;
-    buffer.write_into(&mac);
+    buffer.write_slice_checked(&mac)?;
     print_bytes!("Cookie", &buffer.as_ref()[start..]);
     Ok(())
 }
@@ -279,7 +277,7 @@ pub fn mac_length(secret: &TrafficSecret) -> usize {
             iv: _,
             sn: _,
         } => <Aes128Gcm as AeadCore>::TagSize::to_usize(),
-        _ => unreachable!("Rust requires this branch for references"),
+        _ => unreachable!("Invalid cipher suite"), // Rust requires this branch for references
     }
 }
 
@@ -287,7 +285,7 @@ pub fn aead_encrypt_in_place(
     secret: &TrafficSecret,
     record_seq_num: &u64,
     additional_data: &[u8],
-    plaintext: &mut ParseBuffer<&mut [u8]>,
+    plaintext: &mut ParseBuffer<'_>,
 ) -> Result<(), DtlsError> {
     match secret {
         #[cfg(feature = "aes128gcm_sha256")]
@@ -457,7 +455,7 @@ impl CipherDependentCryptoState {
 
     pub fn encode_verify_data(
         &mut self,
-        buffer: &mut ParseBuffer<&mut [u8]>,
+        buffer: &mut ParseBuffer<'_>,
         secret: &TrafficSecret,
     ) -> Result<(), DtlsError> {
         match (self, secret) {
@@ -485,7 +483,7 @@ impl CipherDependentCryptoState {
 
     pub fn check_verify_data(
         &mut self,
-        buffer: &mut ParseBuffer<&[u8]>,
+        buffer: &mut ParseBuffer<'_>,
         secret: &TrafficSecret,
     ) -> Result<bool, DtlsError> {
         match (self, secret) {
@@ -570,24 +568,22 @@ fn digest_client_hello_1_hash(hash: &mut dyn Update, client_hello_1_hash: &[u8])
 }
 
 fn encode_verify_data<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     traffic_secret: &[u8],
     transcript_hash: &[u8],
 ) -> Result<(), DtlsError> {
     let verify_data = calculate_verify_data::<H>(traffic_secret, transcript_hash)?;
-    buffer.write_into(&verify_data);
-    Ok(())
+    buffer.write_slice_checked(&verify_data)
 }
 
 fn check_verify_data<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
-    buffer: &mut ParseBuffer<&[u8]>,
+    buffer: &mut ParseBuffer<'_>,
     traffic_secret: &[u8],
     transcript_hash: &[u8],
 ) -> Result<bool, DtlsError> {
     let verify_data = calculate_verify_data::<H>(traffic_secret, transcript_hash)?;
     let hash_len = transcript_hash.len();
-    buffer.add_offset(hash_len);
-    Ok(&buffer.as_ref()[buffer.offset() - hash_len..] == verify_data.as_slice())
+    Ok(buffer.read_slice_checked(hash_len)? == verify_data.as_slice())
 }
 
 fn extract_new_hkdf_state<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
@@ -624,7 +620,7 @@ pub fn validate_binder(
 }
 
 pub fn encode_binder_entry(
-    buffer: &mut ParseBuffer<&mut [u8]>,
+    buffer: &mut ParseBuffer<'_>,
     psk: &Psk,
     transcript_hash: &[u8],
 ) -> Result<(), DtlsError> {
@@ -634,9 +630,8 @@ pub fn encode_binder_entry(
         #[cfg(feature = "aes128gcm_sha256")]
         HashFunction::Sha256 => &calculate_binder_value::<Sha256>(psk, transcript_hash)?,
     };
-    buffer.write_u8(binder.len() as u8);
-    buffer.write_into(binder);
-    Ok(())
+    buffer.next_slice::<1>()?.write_u8::<0>(binder.len() as u8);
+    buffer.write_slice_checked(binder)
 }
 
 fn calculate_binder_value<H: Clone + OutputSizeUser + FixedOutput + Digest + BlockSizeUser>(
@@ -680,7 +675,7 @@ fn encrypt_in_place<A: KeyInit + AeadInPlace>(
     iv: &[u8],
     record_seq_num: &u64,
     additional_data: &[u8],
-    plaintext: &mut ParseBuffer<&mut [u8]>,
+    plaintext: &mut ParseBuffer<'_>,
 ) -> Result<(), DtlsError> {
     let mut nonce = GenericArray::default();
     generate_nonce(record_seq_num, iv, nonce.as_mut_slice());
