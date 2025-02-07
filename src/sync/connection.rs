@@ -153,8 +153,7 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
                 &connection.epochs[epoch_index],
                 &connection.current_epoch,
             )?;
-            record.payload_buffer().expect_length(packet.len())?;
-            record.payload_buffer().write_into(packet);
+            record.payload_buffer().write_slice_checked(packet)?;
             record.finish(
                 &mut connection.epochs[epoch_index],
                 RecordContentType::ApplicationData,

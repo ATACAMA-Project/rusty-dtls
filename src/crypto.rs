@@ -152,8 +152,7 @@ pub fn encode_cookie(
 ) -> Result<(), DtlsError> {
     let hash = hash.finalize(&[]);
     let start = buffer.offset();
-    buffer.expect_length(hash.as_ref().len())?;
-    buffer.write_into(hash.as_ref());
+    buffer.write_slice_checked(hash.as_ref())?;
     let mut hmac =
         <SimpleHmac<Sha256> as KeyInit>::new_from_slice(key).map_err(|_| DtlsError::CryptoError)?;
     Mac::update(&mut hmac, hash.as_ref());
@@ -162,8 +161,7 @@ pub fn encode_cookie(
         IpAddr::V6(i) => Mac::update(&mut hmac, &i.to_bits().to_be_bytes()),
     }
     let mac = hmac.finalize_fixed();
-    buffer.expect_length(mac.len())?;
-    buffer.write_into(&mac);
+    buffer.write_slice_checked(&mac)?;
     print_bytes!("Cookie", &buffer.as_ref()[start..]);
     Ok(())
 }
@@ -575,8 +573,7 @@ fn encode_verify_data<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
     transcript_hash: &[u8],
 ) -> Result<(), DtlsError> {
     let verify_data = calculate_verify_data::<H>(traffic_secret, transcript_hash)?;
-    buffer.write_into(&verify_data);
-    Ok(())
+    buffer.write_slice_checked(&verify_data)
 }
 
 fn check_verify_data<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
@@ -586,8 +583,7 @@ fn check_verify_data<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
 ) -> Result<bool, DtlsError> {
     let verify_data = calculate_verify_data::<H>(traffic_secret, transcript_hash)?;
     let hash_len = transcript_hash.len();
-    buffer.add_offset(hash_len);
-    Ok(&buffer.as_ref()[buffer.offset() - hash_len..] == verify_data.as_slice())
+    Ok(buffer.read_slice_checked(hash_len)? == verify_data.as_slice())
 }
 
 fn extract_new_hkdf_state<H: Digest + BlockSizeUser + OutputSizeUser + Clone>(
@@ -634,9 +630,8 @@ pub fn encode_binder_entry(
         #[cfg(feature = "aes128gcm_sha256")]
         HashFunction::Sha256 => &calculate_binder_value::<Sha256>(psk, transcript_hash)?,
     };
-    buffer.write_u8(binder.len() as u8);
-    buffer.write_into(binder);
-    Ok(())
+    buffer.next_slice::<1>()?.write_u8::<0>(binder.len() as u8);
+    buffer.write_slice_checked(binder)
 }
 
 fn calculate_binder_value<H: Clone + OutputSizeUser + FixedOutput + Digest + BlockSizeUser>(

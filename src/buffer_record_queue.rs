@@ -257,11 +257,7 @@ impl<'a> BufferMessageQueue<'a> {
 
     pub fn store_cookie(&mut self, cookie: &[u8]) -> Result<(), DtlsError> {
         print_bytes!("Store Cookie:", cookie);
-        self.cookie = Some(self.alloc_data(&mut |b| {
-            b.expect_length(cookie.len())?;
-            b.write_into(cookie);
-            Ok(())
-        })?);
+        self.cookie = Some(self.alloc_data(&mut |b| b.write_slice_checked(cookie))?);
         Ok(())
     }
 
@@ -405,8 +401,7 @@ fn send_entry<'a>(
     if entry.epoch > 1 {
         let mut record =
             EncodeCiphertextRecord::new(&mut buffer, epoch_state, &(entry.epoch as u64))?;
-        record.payload_buffer().expect_length(slice.len())?;
-        record.payload_buffer().write_into(slice);
+        record.payload_buffer().write_slice_checked(slice)?;
         record.finish(epoch_state, RecordContentType::DtlsHandshake)?;
     } else {
         let mut record = EncodePlaintextRecord::new(
@@ -414,8 +409,7 @@ fn send_entry<'a>(
             RecordContentType::DtlsHandshake,
             epoch_state.send_record_seq_num,
         )?;
-        record.payload_buffer().expect_length(slice.len())?;
-        record.payload_buffer().write_into(slice);
+        record.payload_buffer().write_slice_checked(slice)?;
         record.finish();
         epoch_state.send_record_seq_num += 1;
     }

@@ -292,15 +292,14 @@ fn alloc_client_hello(
             rng,
             cookie,
         )?;
-        handshake.partial_transcript_hash(binders_len, &mut ctx.info.crypto);
+        handshake.add_partial_transcript_hash(binders_len, &mut ctx.info.crypto)?;
         encode_pre_shared_key_client_binders(
             &mut handshake.binders_buffer(),
             ctx.info.selected_cipher_suite,
             ctx.info.available_psks,
             &mut ctx.info.crypto,
         )?;
-        handshake.finish_partial_transcript_hash(&mut ctx.info.crypto);
-        Ok(())
+        handshake.finish_after_partial_transcript_hash(&mut ctx.info.crypto)
     })
 }
 
@@ -356,7 +355,7 @@ pub fn handle_handshake_message_client(
     }
     if let Some(cookie) = cookie {
         record_queue
-            .store_cookie(message.slice_checked(cookie.index..cookie.index + cookie.len)?)?;
+            .store_cookie(message.access_slice_checked(cookie.index..cookie.index + cookie.len)?)?;
     }
     Ok(())
 }
@@ -424,9 +423,8 @@ fn try_unpack_handshake_message<'b>(
                 seq_num
             );
             let res = record_queue.alloc_reordering_entry(seq_num, &mut |buf| {
-                buf.expect_length(message.capacity())?;
                 let message_end = message.capacity();
-                buf.write_into(message.slice_checked(message_start..message_end)?);
+                buf.write_slice_checked(message.access_slice_checked(message_start..message_end)?)?;
                 Ok(())
             });
             match res {

@@ -43,13 +43,13 @@ impl<'a, 'b> EncodePlaintextRecord<'a, 'b> {
         content_type: RecordContentType,
         record_sequence_number: u64,
     ) -> Result<Self, DtlsError> {
-        buffer.expect_length(13)?;
-        buffer.write_u8(content_type as u8);
-        buffer.write_u16(LEGACY_PROTOCOL_VERSION);
-        buffer.write_u16(0);
-        buffer.write_u48(record_sequence_number);
-        let len_pos = buffer.offset();
-        buffer.add_offset(2);
+        let len_pos = buffer.offset() + 11;
+        let mut s = buffer.next_slice::<13>()?;
+        s.write_u8::<0>(content_type as u8);
+        s.write_u16::<1>(LEGACY_PROTOCOL_VERSION);
+        s.write_u16::<3>(0);
+        s.write_u48::<5>(record_sequence_number);
+        // Skip length
         Ok(Self { buffer, len_pos })
     }
 
@@ -61,7 +61,11 @@ impl<'a, 'b> EncodePlaintextRecord<'a, 'b> {
         let payload_len = self.buffer.offset() - self.len_pos - 2;
         // TLS 1.3 5.1 the length MUST no exceed 2^14 bytes.
         assert!(payload_len < 2 << 14);
-        self.buffer.set_u16(self.len_pos, payload_len as u16);
+        let mut s = self
+            .buffer
+            .access_parse_slice_at::<2>(self.len_pos)
+            .expect("Checked in new");
+        s.write_u16::<0>(payload_len as u16);
     }
 }
 
@@ -69,7 +73,7 @@ pub fn parse_record(
     buffer: &mut ParseBuffer<'_>,
     viable_epochs: &mut [EpochState],
 ) -> Result<RecordContentType, DtlsError> {
-    let b = buffer.slice_checked(buffer.offset()..buffer.offset() + 1)?[0];
+    let b = buffer.access_slice_checked(buffer.offset()..buffer.offset() + 1)?[0];
     if b >> 5 == 1 {
         parse_ciphertext_record(buffer, viable_epochs)
     } else {
@@ -82,7 +86,7 @@ pub fn parse_plaintext_record(
     viable_epochs: &mut [EpochState],
 ) -> Result<RecordContentType, DtlsError> {
     trace!("Parse plaintext record");
-    let s = buffer.parse_slice::<13>()?;
+    let s = buffer.next_slice::<13>()?;
     let content_type = TryInto::<RecordContentType>::try_into(s.read_u8::<0>())?;
     parse_expect(
         s.read_u16::<1>() == LEGACY_PROTOCOL_VERSION,
@@ -120,12 +124,12 @@ impl<'a, 'b> EncodeCiphertextRecord<'a, 'b> {
         epoch_state: &EpochState,
         current_epoch: &u64,
     ) -> Result<Self, DtlsError> {
-        buffer.expect_length(CIPHERTEXT_HEADER_LEN)?;
-        buffer.write_u8(0b00101100 + ((*current_epoch as u8) & 3));
-        let seq_num_pos = buffer.offset();
-        buffer.write_u16(epoch_state.send_record_seq_num as u16);
-        let inner_record_len_pos = buffer.offset();
-        buffer.add_offset(2);
+        let seq_num_pos = buffer.offset() + 1;
+        let inner_record_len_pos = buffer.offset() + 3;
+        let mut s = buffer.next_slice::<CIPHERTEXT_HEADER_LEN>()?;
+        s.write_u8::<0>(0b00101100 + ((*current_epoch as u8) & 3));
+        s.write_u16::<1>(epoch_state.send_record_seq_num as u16);
+        // Skip len
         Ok(Self {
             buffer,
             seq_num_pos,
@@ -142,10 +146,15 @@ impl<'a, 'b> EncodeCiphertextRecord<'a, 'b> {
         content_type: RecordContentType,
     ) -> Result<(), DtlsError> {
         let payload_len = self.buffer.offset() - self.inner_record_len_pos - 2;
-        self.buffer.write_u8(content_type as u8);
+        self.buffer
+            .next_slice::<1>()?
+            .write_u8::<0>(content_type as u8);
         let mac_length = mac_length(&epoch_state.write_traffic_secret);
-        for _ in 0..MINIMUM_PAYLOAD_LENGTH.saturating_sub(1 + payload_len + mac_length) {
-            self.buffer.write_u8(0);
+
+        let padding_len = MINIMUM_PAYLOAD_LENGTH.saturating_sub(1 + payload_len + mac_length);
+        let mut padding = self.buffer.parse_slice_iter::<1>(padding_len)?;
+        while let Some(mut s) = padding.next() {
+            s.write_u8::<0>(0);
         }
         let to_encrypt_data_len = self.buffer.offset() - CIPHERTEXT_HEADER_LEN;
 
@@ -163,7 +172,7 @@ impl<'a, 'b> EncodeCiphertextRecord<'a, 'b> {
         xor_sequence_number(
             &epoch_state.write_traffic_secret,
             &mut header[self.seq_num_pos..self.seq_num_pos + 2],
-            payload.slice_checked(0..16)?.try_into().unwrap(),
+            payload.access_slice_checked(0..16)?.try_into().unwrap(),
         )?;
         self.buffer.add_offset(mac_length);
 
@@ -178,7 +187,7 @@ pub fn parse_ciphertext_record(
 ) -> Result<RecordContentType, DtlsError> {
     trace!("Parse ciphertext record");
     let header_start = buffer.offset();
-    let header_descriptor = buffer.parse_slice::<1>()?.read_u8::<0>();
+    let header_descriptor = buffer.next_slice::<1>()?.read_u8::<0>();
     parse_expect((header_descriptor >> 5) == 1, DtlsError::ParseError)?;
     let connection_id_present = (header_descriptor >> 4) & 1 == 1;
     parse_expect(!connection_id_present, DtlsError::ParseError)?;
@@ -191,7 +200,6 @@ pub fn parse_ciphertext_record(
     let seq_num_len = if two_byte_seq_num { 2 } else { 1 };
     let length_field_len = if len_present { 2 } else { 0 };
 
-    buffer.expect_length(seq_num_len + length_field_len + MINIMUM_PAYLOAD_LENGTH)?;
     let (header, payload) = buffer.split_at_mut_checked(1 + seq_num_len + length_field_len)?;
     xor_sequence_number(
         &epoch_state.read_traffic_secret,
@@ -199,12 +207,12 @@ pub fn parse_ciphertext_record(
         &payload[..16].try_into().unwrap(),
     )?;
     let sequence_number_bytes = if two_byte_seq_num {
-        buffer.parse_slice::<2>()?.read_u16::<0>()
+        buffer.next_slice::<2>()?.read_u16::<0>()
     } else {
-        buffer.parse_slice::<1>()?.read_u8::<0>() as u16
+        buffer.next_slice::<1>()?.read_u8::<0>() as u16
     };
     let encrypted_plaintext_len = if len_present {
-        buffer.parse_slice::<2>()?.read_u16::<0>()
+        buffer.next_slice::<2>()?.read_u16::<0>()
     } else {
         (buffer.capacity() - buffer.offset()) as u16
     };
@@ -307,7 +315,10 @@ mod tests {
         let mut buffer = ParseBuffer::init(&mut buf[..]);
         let mut record =
             EncodePlaintextRecord::new(&mut buffer, RecordContentType::DtlsHandshake, 1).unwrap();
-        record.payload_buffer().write_into(b"Hello World");
+        record
+            .payload_buffer()
+            .write_slice_checked(b"Hello World")
+            .unwrap();
         record.finish();
 
         let epoch_state = EpochState {
@@ -364,7 +375,10 @@ mod tests {
             sliding_window: 0,
         };
         let mut record = EncodeCiphertextRecord::new(&mut buffer, &epoch_state, &0).unwrap();
-        record.payload_buffer().write_into(b"Hello World");
+        record
+            .payload_buffer()
+            .write_slice_checked(b"Hello World")
+            .unwrap();
         record
             .finish(&mut epoch_state, RecordContentType::DtlsHandshake)
             .unwrap();
