@@ -1,4 +1,4 @@
-use log::{error, info, trace};
+use log::{error, info, trace, debug};
 
 use crate::{
     parsing::ParseBuffer,
@@ -226,7 +226,7 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
         if self.rt_timestamp_ms > *now_ms {
             return Ok(false);
         }
-        trace!(
+        debug!(
             "Retransmitting entry: epoch: {}, last_record_seq_num: {}",
             self.epoch,
             self.seq_num,
@@ -253,10 +253,8 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
         if self.check_retransmission(now_ms)? {
             let buf = self.send_entry(stage_buffer, epoch_states, epoch)?;
             send_bytes(buf);
-            Ok(self.rt_timestamp_ms)
-        } else {
-            Ok(0)
         }
+        Ok(self.rt_timestamp_ms)
     }
 
     #[cfg(feature = "async")]
@@ -271,16 +269,15 @@ impl<T: Default + HandshakeHeader> Retransmission<T> {
         if self.check_retransmission(now_ms)? {
             let buf = self.send_entry(stage_buffer, epoch_states, epoch)?;
             socket.send(buf).await?;
-            Ok(self.rt_timestamp_ms)
-        } else {
-            Ok(0)
         }
+        Ok(self.rt_timestamp_ms)
     }
 
     fn ack(&mut self, ack_epoch: &Epoch, ack_seq_num: &RecordSeqNum) {
         if self.epoch as Epoch == *ack_epoch && self.seq_num == *ack_seq_num {
             trace!("Acked: epoch: {}, seq_num: {}", ack_epoch, ack_seq_num);
             self.acked = true;
+            self.rt_timestamp_ms = u64::MAX;
         }
     }
 
@@ -308,7 +305,7 @@ impl NetQueue {
         epoch: EpochShort,
         send_bytes: &mut dyn FnMut(&[u8]),
     ) -> Result<DtlsPoll, DtlsError> {
-        let mut next_rt_timestamp = 0;
+        let mut next_rt_timestamp = u64::MAX;
         if let NetQueueState::ClientResend(resend) = &mut self.state {
             let timestamp_ms = match resend {
                 ClientResend::ClientHello(rt) => {
@@ -318,23 +315,23 @@ impl NetQueue {
                     rt.run_retransmission(now_ms, staging_buffer, epoch_states, epoch, send_bytes)?
                 }
             };
-            next_rt_timestamp = next_rt_timestamp.max(timestamp_ms);
+            next_rt_timestamp = next_rt_timestamp.min(timestamp_ms);
         } else if let NetQueueState::ServerResend(resend) = &mut self.state {
-            next_rt_timestamp = next_rt_timestamp.max(resend.sh.run_retransmission(
+            next_rt_timestamp = next_rt_timestamp.min(resend.sh.run_retransmission(
                 now_ms,
                 staging_buffer,
                 epoch_states,
                 epoch,
                 send_bytes,
             )?);
-            next_rt_timestamp = next_rt_timestamp.max(resend.ee.run_retransmission(
+            next_rt_timestamp = next_rt_timestamp.min(resend.ee.run_retransmission(
                 now_ms,
                 staging_buffer,
                 epoch_states,
                 epoch,
                 send_bytes,
             )?);
-            next_rt_timestamp = next_rt_timestamp.max(resend.fin.run_retransmission(
+            next_rt_timestamp = next_rt_timestamp.min(resend.fin.run_retransmission(
                 now_ms,
                 staging_buffer,
                 epoch_states,
@@ -342,7 +339,7 @@ impl NetQueue {
                 send_bytes,
             )?);
         }
-        if next_rt_timestamp == 0 {
+        if next_rt_timestamp == u64::MAX {
             Ok(DtlsPoll::Wait)
         } else {
             Ok(DtlsPoll::WaitTimeoutMs((next_rt_timestamp - now_ms) as u32))
@@ -358,7 +355,7 @@ impl NetQueue {
         epoch: EpochShort,
         socket: &mut SocketAndAddr<'_, Socket>,
     ) -> Result<DtlsPoll, DtlsError> {
-        let mut next_rt_timestamp = 0;
+        let mut next_rt_timestamp = u64::MAX;
         if let NetQueueState::ClientResend(resend) = &mut self.state {
             let timestamp_ms = match resend {
                 ClientResend::ClientHello(rt) => {
@@ -370,28 +367,28 @@ impl NetQueue {
                         .await?
                 }
             };
-            next_rt_timestamp = next_rt_timestamp.max(timestamp_ms);
+            next_rt_timestamp = next_rt_timestamp.min(timestamp_ms);
         } else if let NetQueueState::ServerResend(resend) = &mut self.state {
-            next_rt_timestamp = next_rt_timestamp.max(
+            next_rt_timestamp = next_rt_timestamp.min(
                 resend
                     .sh
                     .run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket)
                     .await?,
             );
-            next_rt_timestamp = next_rt_timestamp.max(
+            next_rt_timestamp = next_rt_timestamp.min(
                 resend
                     .ee
                     .run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket)
                     .await?,
             );
-            next_rt_timestamp = next_rt_timestamp.max(
+            next_rt_timestamp = next_rt_timestamp.min(
                 resend
                     .fin
                     .run_retransmission_async(now_ms, stage_buffer, epoch_states, epoch, socket)
                     .await?,
             );
         }
-        if next_rt_timestamp == 0 {
+        if next_rt_timestamp == u64::MAX {
             Ok(DtlsPoll::Wait)
         } else {
             Ok(DtlsPoll::WaitTimeoutMs((next_rt_timestamp - now_ms) as u32))
