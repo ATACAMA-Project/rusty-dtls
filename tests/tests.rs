@@ -307,6 +307,8 @@ async fn run_handshake_async(
 
 #[cfg(not(feature = "async"))]
 fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_data: bool) {
+    use log::error;
+
     let socket = Mutex::new(UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], own_port))).unwrap());
     let mut send_to_peer = |addr: &SocketAddr, buf: &[u8]| {
         debug!("[{own_port}] Send message. Size: {}", buf.len());
@@ -347,6 +349,9 @@ fn run_handshake(own_port: u16, peer_port: u16, server: bool, server_send_app_da
     let start = Instant::now();
     loop {
         let poll = stack.poll(&mut handshakes, start.elapsed().as_millis() as u64);
+        if poll.is_err() {
+            error!("[{own_port}] PollErr: {poll:?}");
+        }
         assert!(poll.is_ok());
         let poll = poll.unwrap();
         match poll {
