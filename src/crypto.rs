@@ -3,7 +3,8 @@ use core::panic;
 
 use crate::handshake::CryptoInformation;
 use crate::parsing::HandshakeType;
-use crate::{parsing::ParseBuffer, DtlsError};
+use crate::parsing_utility::{ParseBuffer, Parser};
+use crate::DtlsError;
 
 #[cfg(feature = "aes128gcm_sha256")]
 use {aes_gcm::Aes128Gcm, sha2::digest::generic_array::typenum::Unsigned};
@@ -630,8 +631,11 @@ pub fn encode_binder_entry(
         #[cfg(feature = "aes128gcm_sha256")]
         HashFunction::Sha256 => &calculate_binder_value::<Sha256>(psk, transcript_hash)?,
     };
-    buffer.next_slice::<1>()?.write_u8::<0>(binder.len() as u8);
-    buffer.write_slice_checked(binder)
+    Parser::new_mut_slice(buffer, binder)?
+        .write_len_u8()
+        .write_slice()
+        .end();
+    Ok(())
 }
 
 fn calculate_binder_value<H: Clone + OutputSizeUser + FixedOutput + Digest + BlockSizeUser>(

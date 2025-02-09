@@ -13,7 +13,7 @@ use crate::{
     close_connection,
     handshake::{ClientState, ServerState},
     open_connection,
-    parsing::ParseBuffer,
+    parsing_utility::ParseBuffer,
     record_parsing::{EncodeCiphertextRecord, RecordContentType},
     stage_alert, try_open_new_handshake, try_pass_packet_to_connection,
     try_pass_packet_to_handshake, ConnectionId, DeferredAction, DtlsConnection, DtlsError,

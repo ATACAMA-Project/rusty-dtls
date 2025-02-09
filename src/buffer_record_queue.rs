@@ -8,7 +8,7 @@ use crate::asynchronous::SocketAndAddr;
 type EncodeData<'a> = &'a mut dyn FnMut(&mut ParseBuffer<'_>) -> Result<(), DtlsError>;
 
 use crate::{
-    parsing::ParseBuffer,
+    parsing_utility::ParseBuffer,
     record_parsing::{EncodeCiphertextRecord, EncodePlaintextRecord, RecordContentType},
     DtlsError, DtlsPoll, Epoch, EpochShort, EpochState, HandshakeSeqNum, RecordSeqNum,
     RecordSeqNumShort, TimeStampMs,
