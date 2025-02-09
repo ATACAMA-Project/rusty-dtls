@@ -680,7 +680,6 @@ pub fn parse_client_hello_second_pass(
         },
     )?;
 
-    log::debug!("{found_psk_em}, {found_supported_version}");
     if !found_psk_em || !found_supported_version {
         return Err(DtlsError::Alert(AlertDescription::MissingExtension));
     }

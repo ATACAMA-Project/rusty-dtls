@@ -33,7 +33,8 @@ pub enum HeaderUpdate {
 pub enum Action {
     Drop,
     BitFlip(usize),
-    UpatePlaintextHeader(HeaderUpdate),
+    UpdatePlaintextHeader(HeaderUpdate),
+    Truncate(usize),
     Store,
     SendStored,
     Duplicate,
@@ -46,15 +47,20 @@ impl Action {
         addr: &SocketAddr,
         recv_addr: &SocketAddr,
         recv_buf: &mut [u8],
+        msg_len: &mut usize,
     ) -> bool {
         match self {
             Action::SendStored => panic!(),
+            Action::Truncate(size) => {
+                *msg_len = *size;
+                false
+            }
             Action::BitFlip(pos) => {
                 debug!("Flip bit {} in {addr:?} => {recv_addr:?}", pos);
                 recv_buf[pos / 8] ^= 1 << (7 - (pos % 8));
                 false
             }
-            Action::UpatePlaintextHeader(HeaderUpdate::NewLength(len)) => {
+            Action::UpdatePlaintextHeader(HeaderUpdate::NewLength(len)) => {
                 debug!("Update length to {} in {addr:?} => {recv_addr:?}", len);
                 recv_buf[11..=12].copy_from_slice(&len.to_be_bytes());
                 false
@@ -67,10 +73,10 @@ impl Action {
                 debug!("Store {addr:?} => {recv_addr:?}");
                 if addr == &proxy.client {
                     assert!(proxy.client_stored.is_none());
-                    proxy.client_stored = Some((*recv_addr, recv_buf.to_vec()));
+                    proxy.client_stored = Some((*recv_addr, recv_buf[..*msg_len].to_vec()));
                 } else {
                     assert!(proxy.server_stored.is_none());
-                    proxy.server_stored = Some((*recv_addr, recv_buf.to_vec()));
+                    proxy.server_stored = Some((*recv_addr, recv_buf[..*msg_len].to_vec()));
                 }
                 true
             }
@@ -178,7 +184,7 @@ impl Proxy {
                         continue;
                     }
 
-                    let Ok((read, addr)) = self.socket.recv_from(&mut buffer) else {
+                    let Ok((mut read, addr)) = self.socket.recv_from(&mut buffer) else {
                         continue;
                     };
 
@@ -187,7 +193,7 @@ impl Proxy {
                         self.allowed_client_msgs -= 1;
                         self.client_action_index += 1;
                         if let Some(action) = client_action {
-                            if action.run(&mut self, &addr, &recv_addr, &mut buffer[..read]) {
+                            if action.run(&mut self, &addr, &recv_addr, &mut buffer, &mut read) {
                                 continue;
                             }
                         }
@@ -198,7 +204,7 @@ impl Proxy {
                         self.allowed_server_msgs -= 1;
                         self.server_action_index += 1;
                         if let Some(action) = server_action {
-                            if action.run(&mut self, &addr, &recv_addr, &mut buffer[..read]) {
+                            if action.run(&mut self, &addr, &recv_addr, &mut buffer, &mut read) {
                                 continue;
                             }
                         }
@@ -628,7 +634,7 @@ fn client_hello_1_manip_length_to_long() {
     proxy
         .client_action(
             0,
-            Action::UpatePlaintextHeader(HeaderUpdate::NewLength(200)),
+            Action::UpdatePlaintextHeader(HeaderUpdate::NewLength(200)),
         )
         .max_client_msgs(C_MSGS_DFLT + 1)
         .max_server_msgs(S_MSGS_DFLT);
@@ -639,7 +645,20 @@ fn client_hello_1_manip_length_to_long() {
 fn client_hello_1_manip_length_to_short() {
     let mut proxy = Proxy::new();
     proxy
-        .client_action(0, Action::UpatePlaintextHeader(HeaderUpdate::NewLength(20)))
+        .client_action(
+            0,
+            Action::UpdatePlaintextHeader(HeaderUpdate::NewLength(20)),
+        )
+        .max_client_msgs(C_MSGS_DFLT + 1)
+        .max_server_msgs(S_MSGS_DFLT);
+    handshake_test(proxy, false);
+}
+
+#[test]
+fn client_hello_1_truncate() {
+    let mut proxy = Proxy::new();
+    proxy
+        .client_action(0, Action::Truncate(50))
         .max_client_msgs(C_MSGS_DFLT + 1)
         .max_server_msgs(S_MSGS_DFLT);
     handshake_test(proxy, false);
