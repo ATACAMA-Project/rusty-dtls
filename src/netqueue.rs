@@ -518,7 +518,7 @@ impl NetQueue {
 
     pub fn store_cookie(&mut self, cookie: &[u8]) -> Result<(), DtlsError> {
         let NetQueueState::ClientResend(ClientResend::ClientHello(rt)) = &mut self.state else {
-            error!("[NetQueue] in not in state ClientResend ClientHello");
+            error!("[NetQueue] not in state ClientResend ClientHello");
             return Err(DtlsError::IllegalInnerState);
         };
         let len = alloc_data(&mut rt.msg.cookie.data, &mut |b| b.write_slice_checked(cookie))?;
@@ -536,7 +536,7 @@ impl NetQueue {
         ) -> Result<(), DtlsError>,
     ) -> Result<(), DtlsError> {
         let NetQueueState::ClientResend(ClientResend::ClientHello(rt)) = &mut self.state else {
-            error!("[NetQueue] in not in state ClientResend ClientHello");
+            error!("[NetQueue] not in state ClientResend ClientHello");
             return Err(DtlsError::IllegalInnerState);
         };
 
@@ -560,7 +560,7 @@ impl NetQueue {
         encode_data: EncodeData,
     ) -> Result<(), DtlsError> {
         let NetQueueState::ClientResend(ClientResend::Finished(rt)) = &mut self.state else {
-            error!("[NetQueue] in not in state ClientResend Finished");
+            error!("[NetQueue] not in state ClientResend Finished");
             return Err(DtlsError::IllegalInnerState);
         };
 
@@ -577,7 +577,7 @@ impl NetQueue {
         encode_data: EncodeData,
     ) -> Result<(), DtlsError> {
         let NetQueueState::ClientReorder(option) = &mut self.state else {
-            error!("[NetQueue] in not in state ClientReorder");
+            error!("[NetQueue] not in state ClientReorder");
             return Err(DtlsError::IllegalInnerState);
         };
 
@@ -604,7 +604,7 @@ impl NetQueue {
         encode_data: EncodeData,
     ) -> Result<usize, DtlsError> {
         let NetQueueState::ServerResend(resend) = &mut self.state else {
-            error!("[NetQueue] in not in state ServerResend");
+            error!("[NetQueue] not in state ServerResend");
             return Err(DtlsError::IllegalInnerState);
         };
         resend.sh.init(epoch, now_ms);
@@ -620,7 +620,7 @@ impl NetQueue {
         encode_data: EncodeData,
     ) -> Result<usize, DtlsError> {
         let NetQueueState::ServerResend(resend) = &mut self.state else {
-            error!("[NetQueue] in not in state ServerResend");
+            error!("[NetQueue] not in state ServerResend");
             return Err(DtlsError::IllegalInnerState);
         };
         resend.ee.init(epoch, now_ms);
@@ -636,7 +636,7 @@ impl NetQueue {
         encode_data: EncodeData,
     ) -> Result<usize, DtlsError> {
         let NetQueueState::ServerResend(resend) = &mut self.state else {
-            error!("[NetQueue] in not in state ServerResend");
+            error!("[NetQueue] not in state ServerResend");
             return Err(DtlsError::IllegalInnerState);
         };
         resend.fin.init(epoch, now_ms);
