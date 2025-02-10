@@ -49,21 +49,21 @@ impl Action {
         match self {
             Action::SendStored => panic!(),
             Action::BitFlip(pos) => {
-                debug!("Flip bit {} in {addr:?} => {recv_addr:?}", pos);
+                debug!("[Action] Flip bit {} in {addr:?} => {recv_addr:?}", pos);
                 recv_buf[pos / 8] ^= 1 << (7 - (pos % 8));
                 false
             }
             Action::UpatePlaintextHeader(HeaderUpdate::NewLength(len)) => {
-                debug!("Update length to {} in {addr:?} => {recv_addr:?}", len);
+                debug!("[Action] Update length to {} in {addr:?} => {recv_addr:?}", len);
                 recv_buf[11..=12].copy_from_slice(&len.to_be_bytes());
                 false
             }
             Action::Drop => {
-                debug!("Drop {addr:?} => {recv_addr:?}");
+                debug!("[Action] Drop {addr:?} => {recv_addr:?}");
                 true
             }
             Action::Store => {
-                debug!("Store {addr:?} => {recv_addr:?}");
+                debug!("[Action] Store {addr:?} => {recv_addr:?}");
                 if addr == &proxy.client {
                     assert!(proxy.client_stored.is_none());
                     proxy.client_stored = Some((*recv_addr, recv_buf.to_vec()));
@@ -74,7 +74,7 @@ impl Action {
                 true
             }
             Action::Duplicate => {
-                debug!("Duplicate {addr:?} => {recv_addr:?}");
+                debug!("[Action] Duplicate {addr:?} => {recv_addr:?}");
                 proxy.socket.send_to(recv_buf, recv_addr).unwrap();
                 false
             }
@@ -164,14 +164,14 @@ impl Proxy {
 
                     if let Some(Action::SendStored) = client_action {
                         let (addr, buf) = self.client_stored.take().unwrap();
-                        debug!("Send stored {:?} => {addr:?}", &self.client);
+                        debug!("[Proxy] Send stored {:?} => {addr:?}", &self.client);
                         self.socket.send_to(&buf, addr).unwrap();
                         self.client_action_index += 1;
                         continue;
                     }
                     if let Some(Action::SendStored) = server_action {
                         let (addr, buf) = self.server_stored.take().unwrap();
-                        debug!("Send stored {:?} => {addr:?}", &self.server);
+                        debug!("[Proxy] Send stored {:?} => {addr:?}", &self.server);
                         self.socket.send_to(&buf, addr).unwrap();
                         self.server_action_index += 1;
                         continue;
@@ -190,7 +190,7 @@ impl Proxy {
                                 continue;
                             }
                         }
-                        debug!("Forwarding {addr:?} => {recv_addr:?} {read}");
+                        debug!("[Proxy] Forwarding {addr:?} => {recv_addr:?} {read}");
                         self.socket.send_to(&buffer[..read], recv_addr).unwrap();
                     } else if addr == self.server {
                         let recv_addr = self.client;
@@ -201,7 +201,7 @@ impl Proxy {
                                 continue;
                             }
                         }
-                        debug!("Forwarding {addr:?} => {recv_addr:?} {read}");
+                        debug!("[Proxy] Forwarding {addr:?} => {recv_addr:?} {read}");
                         self.socket.send_to(&buffer[..read], recv_addr).unwrap();
                     } else {
                         panic!()
@@ -492,6 +492,18 @@ fn reorder_encrypted_extensions() {
         .server_action(4, Action::SendStored)
         .max_client_msgs(C_MSGS_DFLT)
         .max_server_msgs(S_MSGS_DFLT);
+
+    handshake_test(proxy, false)
+}
+
+#[test]
+fn reorder_server_hello() {
+    let mut proxy = Proxy::new();
+    proxy
+        .server_action(1, Action::Store)
+        .server_action(3, Action::SendStored)
+        .max_client_msgs(C_MSGS_DFLT)
+        .max_server_msgs(S_MSGS_DFLT + 3);
 
     handshake_test(proxy, false)
 }
