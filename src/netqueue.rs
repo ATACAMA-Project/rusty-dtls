@@ -1,7 +1,7 @@
 use log::{error, info, trace, debug};
 
 use crate::{
-    parsing::ParseBuffer,
+    parsing_utility::ParseBuffer,
     record_parsing::{EncodeCiphertextRecord, EncodePlaintextRecord, RecordContentType},
     DtlsError, DtlsPoll, Epoch, EpochShort, EpochState, HandshakeSeqNum, RecordSeqNum, TimeStampMs,
 };
