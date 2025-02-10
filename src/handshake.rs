@@ -9,9 +9,10 @@ use crate::parsing::{
     encode_server_hello, parse_encrypted_extensions, parse_finished, parse_server_hello, Cookie,
     EncodeHandshakeMessage, HandshakeType, ParseAck, ParseHandshakeMessage, ServerHelloVariant,
 };
+use crate::parsing_utility::ParseBuffer;
 use crate::{
     crypto::{CipherDependentCryptoState, CipherSuite, Psk, PskTranscriptHashes},
-    parsing::{encode_client_hello, ParseBuffer},
+    parsing::encode_client_hello,
     record_parsing::RecordContentType,
     DtlsError, DtlsPoll,
 };

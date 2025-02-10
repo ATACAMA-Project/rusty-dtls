@@ -11,11 +11,12 @@ use log::{debug, info, trace};
 use parsing::{
     encode_alert, encode_hello_retry, parse_alert, parse_client_hello_first_pass,
     parse_client_hello_second_pass, ClientHelloResult, EncodeAck, EncodeHandshakeMessage,
-    HandshakeType, HelloRetryCookie, ParseBuffer, ParseHandshakeMessage,
+    HandshakeType, HelloRetryCookie, ParseHandshakeMessage,
 };
 
 pub use crypto::{HashFunction, Psk};
 
+use parsing_utility::ParseBuffer;
 use record_parsing::{
     parse_plaintext_record, parse_record, EncodeCiphertextRecord, EncodePlaintextRecord,
     RecordContentType,
@@ -36,6 +37,7 @@ mod crypto;
 mod handshake;
 mod netqueue;
 mod parsing;
+mod parsing_utility;
 mod record_parsing;
 
 type Epoch = u64;
@@ -492,7 +494,7 @@ fn try_open_new_handshake<'a>(
                 break;
             }
             Err(err) => {
-                trace!("Error parsing client_hello: {err:?}");
+                debug!("[Server] Error parsing client_hello: {err:?}");
             }
         }
         handshake_slot.close(connections);
