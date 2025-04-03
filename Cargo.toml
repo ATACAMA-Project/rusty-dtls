@@ -4,6 +4,7 @@ license = "MIT"
 version = "0.1.0"
 edition = "2024"
 description = "Implementation of DTLS 1.3."
+repository = "https://github.com/ATACAMA-Project/rusty-dtls"
 autotests = true
 
 [dependencies]
