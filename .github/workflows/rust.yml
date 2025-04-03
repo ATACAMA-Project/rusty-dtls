@@ -22,4 +22,4 @@ jobs:
     - name: Run sync tests
       run: cargo test --features aes128gcm_sha256 --test tests --verbose -- --test-threads=1
     - name: Run async tests
-      run: cargo test--features aes128gcm_sha256 --features async --test tests --verbose -- --test-threads=1
+      run: cargo test --features aes128gcm_sha256 --features async --test tests --verbose -- --test-threads=1
