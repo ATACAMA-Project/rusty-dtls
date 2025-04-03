@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build library
+      run: cargo build --verbose
+    - name: Check for parse errors
+      run: cargo build --example echo --features aes128gcm_sha256 --features async --release
+    - name: Run unit tests
+      run: cargo test --features aes128gcm_sha256 --lib
+    - name: Run sync tests
+      run: cargo test --features aes128gcm_sha256 --test tests --verbose -- --test-threads=1
+    - name: Run async tests
+      run: cargo test --features aes128gcm_sha256 --features async --test tests --verbose -- --test-threads=1
