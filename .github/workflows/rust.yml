@@ -19,6 +19,8 @@ jobs:
       run: cargo build --verbose
     - name: Check for parse errors
       run: cargo build --example echo --features aes128gcm_sha256 --features async --release
+    - name: Run unit tests
+      run: cargo test --features aes128gcm_sha256 --lib
     - name: Run sync tests
       run: cargo test --features aes128gcm_sha256 --test tests --verbose -- --test-threads=1
     - name: Run async tests
