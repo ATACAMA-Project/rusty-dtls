@@ -1,7 +1,9 @@
 [package]
 name = "rusty-dtls"
+license = "MIT"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+description = "Implementation of DTLS 1.3."
 autotests = true
 
 [dependencies]
