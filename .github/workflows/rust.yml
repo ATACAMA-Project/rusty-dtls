@@ -15,8 +15,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build library
-      run: cargo build --verbose
     - name: Check for parse errors
       run: cargo build --example echo --features aes128gcm_sha256,secp256r1 --features async --release
     - name: Run unit tests
