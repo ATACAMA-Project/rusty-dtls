@@ -1,13 +1,17 @@
 use {
     core::time::Duration,
-    rusty_dtls::ConnectionId,
-    rusty_dtls::{DtlsPoll, DtlsStack, HandshakeSlot, HashFunction, Psk},
-    std::net::SocketAddr,
-    std::net::UdpSocket,
-    std::ops::Range,
-    std::sync::Mutex,
-    std::thread,
-    std::time::Instant,
+    rusty_dtls::{
+        ConnectionId, DtlsPoll, DtlsStack, HandshakeSlot, HashFunction, Milliseconds, NamedGroup,
+        Psk,
+    },
+    std::{
+        env::{self},
+        net::{SocketAddr, UdpSocket},
+        ops::Range,
+        sync::Mutex,
+        thread,
+        time::Instant,
+    },
 };
 
 fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
@@ -37,7 +41,7 @@ fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
             }
         };
 
-    let mut staging_buffer = [0; 256];
+    let mut staging_buffer = [0; 1256];
     let mut rand = rand::thread_rng();
     let psks = [Psk::new(&[123], &[1, 2, 3, 4, 5], HashFunction::Sha256)];
     let mut stack =
@@ -47,9 +51,19 @@ fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
     let mut buffer = [0; 1024];
     let mut handshakes = Vec::new();
     if server {
-        handshakes.push(HandshakeSlot::new(&psks, &mut buffer));
+        handshakes.push(HandshakeSlot::new(
+            &psks,
+            &[NamedGroup::Secp256r1],
+            &mut buffer,
+        ));
+        assert!(stack.accept_connection(&mut handshakes[0]));
     } else {
-        handshakes.push(HandshakeSlot::new(&psks, &mut buffer));
+        handshakes.push(HandshakeSlot::new(
+            &psks,
+            &[NamedGroup::Secp256r1],
+            &mut buffer,
+        ));
+        handshakes[0].set_psk_exchange_modes(false, true);
         assert!(stack.open_connection(
             &mut handshakes[0],
             &format!("127.0.0.1:{}", peer_port).parse().unwrap()
@@ -60,7 +74,7 @@ fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
     let mut server_id = None;
     loop {
         let poll = stack
-            .poll(&mut handshakes, start.elapsed().as_millis() as u64)
+            .poll(&mut handshakes, start.elapsed().as_millis() as Milliseconds)
             .unwrap();
         match poll {
             DtlsPoll::WaitTimeoutMs(ms) => {
@@ -102,16 +116,22 @@ fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
                     .handle_dtls_packet(&mut handshakes, &addr, received, &mut handle_app_data)
                     .unwrap();
             }
-            DtlsPoll::FinishedHandshake => {
-                for hs in &mut handshakes {
-                    let Some(id) = hs.try_take_connection_id() else {
-                        continue;
-                    };
-                    if !server {
-                        server_id = Some(id);
-                    }
-                    println!("[{port}] Got connection id: {:?}", id);
+            DtlsPoll::FinishedHandshake(i) => {
+                let hs = &mut handshakes[i];
+                let Some(id) = hs.try_take_connection_id() else {
+                    continue;
+                };
+                if !server {
+                    server_id = Some(id);
                 }
+                println!("[{port}] Got connection id: {:?}", id);
+            }
+            DtlsPoll::AbortedHandshake(i) => {
+                let hs = &mut handshakes[i];
+                let Some(reason) = hs.try_take_abort_reason() else {
+                    continue;
+                };
+                println!("[{port}] Handshake aborted: {:?}", reason);
             }
         }
     }
@@ -119,15 +139,17 @@ fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
 
 fn main() {
     let _ = simple_logger::SimpleLogger::new()
-        .with_level(log::LevelFilter::Info)
+        .with_level(log::LevelFilter::Trace)
         .init();
-
-    let t1 = thread::spawn(|| {
-        spawn_endpoint(62447, 50402, true);
-    });
-    let t2 = thread::spawn(|| {
-        spawn_endpoint(50402, 62447, false);
-    });
-    t1.join().unwrap();
-    t2.join().unwrap();
+    if env::args().count() > 1 {
+        let t1 = thread::spawn(|| {
+            spawn_endpoint(62447, 50402, true);
+        });
+        t1.join().unwrap();
+    } else {
+        let t2 = thread::spawn(|| {
+            spawn_endpoint(50402, 62447, false);
+        });
+        t2.join().unwrap();
+    }
 }

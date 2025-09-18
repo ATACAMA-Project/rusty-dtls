@@ -2,20 +2,19 @@ use core::{borrow::BorrowMut, net::SocketAddr, ops::Range};
 
 use log::trace;
 use rand_core::CryptoRngCore;
-use sha2::{
-    digest::{generic_array::GenericArray, OutputSizeUser},
-    Sha256,
-};
+use sha2::digest::generic_array::GenericArray;
 
 use crate::{
-    close_connection,
+    ConnectionId, DeferredAction, DtlsConnection, DtlsError, DtlsPoll, EpochState, HandshakeSlot,
+    HandshakeSlotState, HandshakeState, SelectNamedGroup, StackContext, Milliseconds,
+    accept_connection, close_connection,
+    crypto::default_select_named_group,
     handshake::{ClientState, ServerState},
     open_connection,
     parsing_utility::ParseBuffer,
     record_parsing::{EncodeCiphertextRecord, RecordContentType},
     stage_alert, try_open_new_handshake, try_pass_packet_to_connection,
-    try_pass_packet_to_handshake, ConnectionId, DeferredAction, DtlsConnection, DtlsError,
-    DtlsPoll, EpochState, HandshakeSlot, HandshakeSlotState, HandshakeState, TimeStampMs,
+    try_pass_packet_to_handshake,
 };
 
 use super::handshake::{process_client_sync, process_server_sync};
@@ -23,15 +22,8 @@ use super::handshake::{process_client_sync, process_server_sync};
 pub struct DtlsStack<'a, const CONNECTIONS: usize> {
     connections: [Option<DtlsConnection<'a>>; CONNECTIONS],
 
-    rng: &'a mut dyn rand_core::CryptoRngCore,
-    staging_buffer: &'a mut [u8],
-
+    context: StackContext<'a>,
     send_to_peer: &'a mut dyn FnMut(&SocketAddr, &[u8]),
-
-    require_cookie: bool,
-    // In any case the minimal recommended length for K is L bytes (as the hash output
-    // length) RFC 2104
-    cookie_key: GenericArray<u8, <Sha256 as OutputSizeUser>::OutputSize>,
 }
 
 impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
@@ -42,14 +34,18 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
     ) -> Result<Self, DtlsError> {
         let mut me = Self {
             connections: [const { None }; CONNECTIONS],
-            rng,
-            staging_buffer,
+            context: StackContext {
+                rng,
+                staging_buffer,
+                select_group: default_select_named_group,
+                require_cookie: true,
+                cookie_key: GenericArray::default(),
+            },
             send_to_peer,
-            cookie_key: GenericArray::default(),
-            require_cookie: true,
         };
-        me.rng
-            .try_fill_bytes(&mut me.cookie_key)
+        me.context
+            .rng
+            .try_fill_bytes(&mut me.context.cookie_key)
             .map_err(|_| DtlsError::RngError)?;
         Ok(me)
     }
@@ -57,10 +53,10 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
     pub fn poll(
         &mut self,
         handshakes: &mut [HandshakeSlot],
-        now_ms: TimeStampMs,
+        now_ms: Milliseconds,
     ) -> Result<DtlsPoll, DtlsError> {
         let mut return_poll = DtlsPoll::Wait;
-        for handshake in handshakes {
+        for (i, handshake) in handshakes.iter_mut().enumerate() {
             let poll = match &mut handshake.state {
                 HandshakeSlotState::Running {
                     state,
@@ -71,29 +67,30 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
                     let addr = conn.addr;
                     let poll = match &mut new_state {
                         HandshakeState::Client(c) => process_client_sync(
-                            c,
-                            &now_ms,
-                            ctx,
-                            &mut handshake.rt_queue,
-                            conn,
-                            self.rng,
-                            self.staging_buffer,
+                            &mut self.context,
                             &mut |bytes| (self.send_to_peer)(&addr, bytes),
+                            i,
+                            ctx,
+                            c,
+                            &mut handshake.rt_queue,
+                            &handshake.settings,
+                            conn,
+                            &now_ms,
                         ),
                         HandshakeState::Server(s) => process_server_sync(
-                            s,
-                            &now_ms,
+                            &mut self.context,
+                            &mut |bytes| (self.send_to_peer)(&addr, bytes),
+                            i,
                             ctx,
+                            s,
                             &mut handshake.rt_queue,
                             conn,
-                            self.rng,
-                            self.staging_buffer,
-                            &mut |bytes| (self.send_to_peer)(&addr, bytes),
+                            &now_ms,
                         ),
                     };
                     try_send_alert_sync(
                         &poll,
-                        self.staging_buffer,
+                        self.context.staging_buffer,
                         &mut |b| (self.send_to_peer)(&addr, b),
                         &mut conn.epochs,
                         &conn.current_epoch,
@@ -109,16 +106,26 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
                     }
                     poll
                 }
+                HandshakeSlotState::AcceptConnection => DtlsPoll::Wait,
                 HandshakeSlotState::Empty => DtlsPoll::Wait,
-                HandshakeSlotState::Finished(_) => DtlsPoll::FinishedHandshake,
+                HandshakeSlotState::Finished(_) => DtlsPoll::FinishedHandshake(i),
+                HandshakeSlotState::Aborted(_) => DtlsPoll::AbortedHandshake(i),
             };
             return_poll = return_poll.merge(poll);
         }
         Ok(return_poll)
     }
 
+    /// Starts a new handshake.
+    /// Returns whether the handshake was correctly started.
     pub fn open_connection(&mut self, slot: &mut HandshakeSlot, addr: &SocketAddr) -> bool {
-        open_connection(&mut self.connections, slot, addr)
+        open_connection(slot, &mut self.connections, addr)
+    }
+
+    /// Accepts connections on this slot.
+    /// Returns whether the slot now would accept a connection.
+    pub fn accept_connection(&mut self, slot: &mut HandshakeSlot) -> bool {
+        accept_connection(slot)
     }
 
     /// Returns whether the connection was closed successfully
@@ -129,7 +136,11 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
             .and_then(|c| c.as_ref().map(|c| c.addr));
         match (
             addr,
-            close_connection(connection_id, self.staging_buffer, &mut self.connections),
+            close_connection(
+                self.context.staging_buffer,
+                &mut self.connections,
+                connection_id,
+            ),
         ) {
             (Some(addr), DeferredAction::Send(buf)) => {
                 (self.send_to_peer)(&addr, buf);
@@ -146,7 +157,7 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
         packet: &[u8],
     ) -> Result<(), DtlsError> {
         if let Some(connection) = &mut self.connections[connection_id.0] {
-            let mut buffer = ParseBuffer::init(self.staging_buffer.borrow_mut());
+            let mut buffer = ParseBuffer::init(self.context.staging_buffer.borrow_mut());
             let epoch_index = connection.current_epoch as usize & 3;
             let mut record = EncodeCiphertextRecord::new(
                 &mut buffer,
@@ -166,7 +177,7 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
     }
 
     pub fn staging_buffer(&mut self) -> &mut [u8] {
-        self.staging_buffer
+        self.context.staging_buffer
     }
 
     pub fn handle_dtls_packet(
@@ -178,7 +189,7 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
     ) -> Result<(), DtlsError> {
         let mut handled = true;
         match try_pass_packet_to_connection(
-            self.staging_buffer,
+            self.context.staging_buffer,
             &mut self.connections,
             addr,
             packet_len,
@@ -194,9 +205,9 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
         handled = true;
         trace!("Could not match packet to connection");
         match try_pass_packet_to_handshake(
-            self.staging_buffer,
-            &mut self.connections,
+            &mut self.context,
             handshakes,
+            &mut self.connections,
             addr,
             packet_len,
         )? {
@@ -210,9 +221,7 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
         }
         trace!("Could not match packet to handshake");
         if let Some(buf) = try_open_new_handshake(
-            self.staging_buffer,
-            self.require_cookie,
-            &self.cookie_key,
+            &mut self.context,
             handshakes,
             &mut self.connections,
             addr,
@@ -224,7 +233,11 @@ impl<'a, const CONNECTIONS: usize> DtlsStack<'a, CONNECTIONS> {
     }
 
     pub fn require_cookie(&mut self, require_cookie: bool) {
-        self.require_cookie = require_cookie;
+        self.context.require_cookie = require_cookie;
+    }
+
+    pub fn select_group(&mut self, select_group: SelectNamedGroup) {
+        self.context.select_group = select_group
     }
 }
 
@@ -235,10 +248,10 @@ fn try_send_alert_sync<T>(
     epoch_states: &mut [EpochState],
     epoch: &u64,
 ) {
-    if let Err(DtlsError::Alert(alert)) = error {
-        if let Ok(buf) = stage_alert(staging_buffer, epoch_states, epoch, *alert) {
-            send_bytes(buf);
-        }
+    if let Err(DtlsError::Alert(alert)) = error
+        && let Ok(buf) = stage_alert(staging_buffer, epoch_states, epoch, *alert)
+    {
+        send_bytes(buf);
     }
 }
 
@@ -253,8 +266,8 @@ mod tests {
         let mut send_to_peer = |_: &SocketAddr, _: &[u8]| {};
         let mut stack = DtlsStack::<1>::new(&mut rng, &mut [], &mut send_to_peer).unwrap();
         let mut hs = [
-            HandshakeSlot::new(&[], &mut []),
-            HandshakeSlot::new(&[], &mut []),
+            HandshakeSlot::new(&[], &[], &mut []),
+            HandshakeSlot::new(&[], &[], &mut []),
         ];
         let res = stack.open_connection(
             &mut hs[0],
@@ -274,7 +287,7 @@ mod tests {
         let mut send_to_peer = |_: &SocketAddr, _: &[u8]| {};
         let mut b = [0; 250];
         let mut stack = DtlsStack::<1>::new(&mut rng, &mut b, &mut send_to_peer).unwrap();
-        let mut hs = [HandshakeSlot::new(&[], &mut [])];
+        let mut hs = [HandshakeSlot::new(&[], &[], &mut [])];
         let res = stack.open_connection(
             &mut hs[0],
             &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -298,7 +311,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mut send_to_peer = |_: &SocketAddr, _: &[u8]| {};
         let mut stack = DtlsStack::<1>::new(&mut rng, &mut [], &mut send_to_peer).unwrap();
-        let mut hs = [HandshakeSlot::new(&[], &mut [])];
+        let mut hs = [HandshakeSlot::new(&[], &[], &mut [])];
         let res = stack.open_connection(
             &mut hs[0],
             &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -315,7 +328,7 @@ mod tests {
         let mut stage_buffer = [0u8; 250];
         let mut stack =
             DtlsStack::<1>::new(&mut rng, &mut stage_buffer, &mut send_to_peer).unwrap();
-        let mut hs = [HandshakeSlot::new(&[], &mut [])];
+        let mut hs = [HandshakeSlot::new(&[], &[], &mut [])];
         let res = stack.open_connection(
             &mut hs[0],
             &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),

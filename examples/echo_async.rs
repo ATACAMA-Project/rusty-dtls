@@ -35,9 +35,9 @@ async fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
 
     let mut handshakes = Vec::new();
     if server {
-        handshakes.push(HandshakeSlot::new(&psks, &mut buffer));
+        handshakes.push(HandshakeSlot::new(&psks, &[], &mut buffer));
     } else {
-        handshakes.push(HandshakeSlot::new(&psks, &mut buffer));
+        handshakes.push(HandshakeSlot::new(&psks, &[], &mut buffer));
         assert!(stack.open_connection(
             &mut handshakes[0],
             &format!("127.0.0.1:{}", peer_port).parse().unwrap()
@@ -46,13 +46,13 @@ async fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
 
     let mut id = None;
     loop {
-        if !server {
-            if let Some(id) = id {
-                stack
-                    .send_dtls_packet(id, "Hello World".as_bytes())
-                    .await
-                    .unwrap();
-            }
+        if let Some(id) = id
+            && !server
+        {
+            stack
+                .send_dtls_packet(id, "Hello World".as_bytes())
+                .await
+                .unwrap();
         }
         println!("[{port}] Read");
         let e = stack.read(&mut handshakes, 5000).await;
@@ -63,9 +63,13 @@ async fn spawn_endpoint(port: u16, peer_port: u16, server: bool) {
                     String::from_utf8_lossy(&stack.staging_buffer()[range])
                 );
             }
-            rusty_dtls::Event::OpenedConnection => {
-                id = handshakes[0].try_take_connection_id();
+            rusty_dtls::Event::OpenedConnection(i) => {
+                id = handshakes[i].try_take_connection_id();
                 println!("[{port}] Opened conid {id:?}");
+            }
+            rusty_dtls::Event::AbortedHandshake(i) => {
+                let reason = handshakes[i].try_take_abort_reason();
+                println!("[{port}] Aborted handshake {reason:?}");
             }
             _ => {}
         };

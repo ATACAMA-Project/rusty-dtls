@@ -1,10 +1,11 @@
 use log::{debug, trace};
 
 use crate::{
-    crypto::{aead_decrypt_in_place, aead_encrypt_in_place, mac_length, xor_sequence_number},
-    parsing::LEGACY_PROTOCOL_VERSION,
-    parsing_utility::{parse_expect, ParseBuffer, Parser},
     DtlsError, EpochState,
+    crypto::{aead_decrypt_in_place, aead_encrypt_in_place, mac_length, xor_sequence_number},
+    parse_err,
+    parsing::LEGACY_PROTOCOL_VERSION,
+    parsing_utility::{ParseBuffer, Parser, parse_expect},
 };
 
 #[repr(u8)]
@@ -27,7 +28,7 @@ impl TryFrom<u8> for RecordContentType {
             26 => Ok(RecordContentType::Ack),
             v => {
                 debug!("Received unknown content type: {}", v);
-                Err(DtlsError::ParseError)
+                Err(parse_err!())
             }
         }
     }
@@ -60,15 +61,13 @@ impl<'a, 'b> EncodePlaintextRecord<'a, 'b> {
         self.buffer
     }
 
-    pub fn finish(self) {
+    pub fn finish(self) -> Result<(), DtlsError> {
         let payload_len = self.buffer.offset() - self.len_pos - 2;
         // TLS 1.3 5.1 the length MUST no exceed 2^14 bytes.
         debug_assert!(payload_len < 2 << 14);
         let mut buf = self.buffer.with_offset(self.len_pos);
-        Parser::new(&mut buf)
-            .expect("Checked in new")
-            .write_u16(payload_len as u16)
-            .end();
+        Parser::new(&mut buf)?.write_u16(payload_len as u16).end();
+        Ok(())
     }
 }
 
@@ -313,7 +312,7 @@ mod tests {
     };
 
     use super::{parse_plaintext_record, reconstruct_seq_num};
-    use crate::{crypto::TrafficSecret, record_parsing::parse_ciphertext_record, EpochState};
+    use crate::{EpochState, crypto::TrafficSecret, record_parsing::parse_ciphertext_record};
     use sha2::digest::generic_array::GenericArray;
 
     #[test]
@@ -328,7 +327,7 @@ mod tests {
             .payload_buffer()
             .write_slice_checked(b"Hello World")
             .unwrap();
-        record.finish();
+        record.finish().unwrap();
 
         let epoch_state = EpochState {
             send_record_seq_num: 0,

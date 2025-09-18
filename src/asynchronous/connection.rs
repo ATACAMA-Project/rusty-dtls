@@ -1,23 +1,21 @@
 use core::{borrow::BorrowMut, net::SocketAddr, ops::Range};
 
-use embassy_futures::select::{select, Either};
-use embedded_time::{duration::Milliseconds, fixed_point::FixedPoint};
+use embassy_futures::select::{Either, select};
+use embedded_time::{duration, fixed_point::FixedPoint};
 use log::trace;
 use rand_core::CryptoRngCore;
-use sha2::{
-    digest::{generic_array::GenericArray, OutputSizeUser},
-    Sha256,
-};
+use sha2::digest::generic_array::GenericArray;
 
 use crate::{
-    close_connection,
+    ConnectionId, DeferredAction, DtlsConnection, DtlsError, DtlsPoll, EpochState, HandshakeSlot,
+    HandshakeSlotIndex, HandshakeSlotState, HandshakeState, Milliseconds, SelectNamedGroup,
+    StackContext, accept_connection, close_connection, default_select_named_group,
     handshake::{ClientState, ServerState},
     open_connection,
     parsing_utility::ParseBuffer,
     record_parsing::{EncodeCiphertextRecord, RecordContentType},
     stage_alert, try_open_new_handshake, try_pass_packet_to_connection,
-    try_pass_packet_to_handshake, ConnectionId, DeferredAction, DtlsConnection, DtlsError,
-    DtlsPoll, EpochState, HandshakeSlot, HandshakeSlotState, HandshakeState, TimeStampMs,
+    try_pass_packet_to_handshake,
 };
 
 use super::handshake::{process_client_async, process_server_async};
@@ -39,7 +37,8 @@ impl<Socket: embedded_nal_async::UnconnectedUdp> SocketAndAddr<'_, Socket> {
 
 pub enum Event {
     AppData(ConnectionId, Range<usize>),
-    OpenedConnection,
+    OpenedConnection(HandshakeSlotIndex),
+    AbortedHandshake(HandshakeSlotIndex),
     Timeout,
     Exit,
 }
@@ -53,13 +52,7 @@ pub struct DtlsStackAsync<
 > {
     connections: [Option<DtlsConnection<'a>>; CONNECTIONS],
 
-    rng: &'a mut dyn rand_core::CryptoRngCore,
-    staging_buffer: &'a mut [u8],
-
-    require_cookie: bool,
-    // In any case the minimal recommended length for K is L bytes (as the hash output
-    // length) RFC 2104
-    cookie_key: GenericArray<u8, <Sha256 as OutputSizeUser>::OutputSize>,
+    context: StackContext<'a>,
 
     delay: Delay,
     clock: Clock,
@@ -68,12 +61,12 @@ pub struct DtlsStackAsync<
 }
 
 impl<
-        'a,
-        Delay: embedded_hal_async::delay::DelayNs,
-        Clock: embedded_time::Clock,
-        Socket: embedded_nal_async::UnconnectedUdp,
-        const CONNECTIONS: usize,
-    > DtlsStackAsync<'a, Delay, Clock, Socket, CONNECTIONS>
+    'a,
+    Delay: embedded_hal_async::delay::DelayNs,
+    Clock: embedded_time::Clock,
+    Socket: embedded_nal_async::UnconnectedUdp,
+    const CONNECTIONS: usize,
+> DtlsStackAsync<'a, Delay, Clock, Socket, CONNECTIONS>
 where
     <Clock as embedded_time::Clock>::T: Into<u64>,
 {
@@ -87,44 +80,48 @@ where
     ) -> Result<Self, DtlsError> {
         let mut me = Self {
             connections: [const { None }; CONNECTIONS],
-            rng,
-            staging_buffer,
-            cookie_key: GenericArray::default(),
-            require_cookie: true,
+            context: StackContext {
+                rng,
+                staging_buffer,
+                select_group: default_select_named_group,
+                require_cookie: true,
+                cookie_key: GenericArray::default(),
+            },
             delay,
             clock,
             socket,
             addr,
         };
-        me.rng
-            .try_fill_bytes(&mut me.cookie_key)
+        me.context
+            .rng
+            .try_fill_bytes(&mut me.context.cookie_key)
             .map_err(|_| DtlsError::RngError)?;
         Ok(me)
     }
 
     pub fn staging_buffer(&mut self) -> &mut [u8] {
-        self.staging_buffer
+        self.context.staging_buffer
     }
 
-    fn now_ms(&mut self) -> Result<u64, DtlsError> {
+    fn now_ms(&mut self) -> Result<Milliseconds, DtlsError> {
         let now_instant = self.clock.try_now().map_err(|_| DtlsError::IoError)?;
         let now = now_instant.duration_since_epoch();
-        let now = Milliseconds::<<Clock as embedded_time::Clock>::T>::try_from(now)
+        let now = duration::Milliseconds::<<Clock as embedded_time::Clock>::T>::try_from(now)
             .map_err(|_| DtlsError::IoError)?;
-        let now: u64 = now.integer().into();
+        let now = now.integer().into() as Milliseconds;
         Ok(now)
     }
 
     pub async fn read(
         &mut self,
         handshakes: &mut [HandshakeSlot<'_>],
-        read_timeout: u32,
+        read_timeout: Milliseconds,
     ) -> Result<Event, DtlsError> {
         let start_ms = self.now_ms()?;
         loop {
             let now = self.now_ms()?;
 
-            let time_elapsed = (now - start_ms) as u32;
+            let time_elapsed = now - start_ms;
             if read_timeout > 0 && time_elapsed > read_timeout {
                 return Ok(Event::Timeout);
             }
@@ -138,8 +135,9 @@ where
                         timeout
                     };
                     let select = embassy_futures::select::select(
-                        self.delay.delay_ms(timeout),
-                        self.socket.receive_into(self.staging_buffer),
+                        #[allow(clippy::unnecessary_cast)]
+                        self.delay.delay_ms(timeout as u32),
+                        self.socket.receive_into(self.context.staging_buffer),
                     )
                     .await;
                     let Either::Second(received) = select else {
@@ -150,8 +148,9 @@ where
                 DtlsPoll::Wait => {
                     if read_timeout > 0 {
                         let select = select(
-                            self.delay.delay_ms(read_timeout - time_elapsed),
-                            self.socket.receive_into(self.staging_buffer),
+                            #[allow(clippy::unnecessary_cast)]
+                            self.delay.delay_ms((read_timeout - time_elapsed) as u32),
+                            self.socket.receive_into(self.context.staging_buffer),
                         )
                         .await;
                         let Either::Second(received) = select else {
@@ -159,10 +158,11 @@ where
                         };
                         received
                     } else {
-                        self.socket.receive_into(self.staging_buffer).await
+                        self.socket.receive_into(self.context.staging_buffer).await
                     }
                 }
-                DtlsPoll::FinishedHandshake => return Ok(Event::OpenedConnection),
+                DtlsPoll::FinishedHandshake(i) => return Ok(Event::OpenedConnection(i)),
+                DtlsPoll::AbortedHandshake(i) => return Ok(Event::AbortedHandshake(i)),
             };
             let (read, _, remote) = received.map_err(|_| DtlsError::IoError)?;
             let data = self.handle_dtls_packet(handshakes, &remote, read).await?;
@@ -174,7 +174,13 @@ where
     /// Starts a new handshake.
     /// Returns whether the handshake was correctly started.
     pub fn open_connection(&mut self, slot: &mut HandshakeSlot, addr: &SocketAddr) -> bool {
-        open_connection(&mut self.connections, slot, addr)
+        open_connection(slot, &mut self.connections, addr)
+    }
+
+    /// Accepts connections on this slot.
+    /// Returns whether the slot now would accept a connection.
+    pub fn accept_connection(&mut self, slot: &mut HandshakeSlot) -> bool {
+        accept_connection(slot)
     }
 
     /// Returns whether the connection was closed successfully
@@ -185,7 +191,11 @@ where
             .and_then(|c| c.as_ref().map(|c| c.addr));
         match (
             addr,
-            close_connection(connection_id, self.staging_buffer, &mut self.connections),
+            close_connection(
+                self.context.staging_buffer,
+                &mut self.connections,
+                connection_id,
+            ),
         ) {
             (Some(peer_addr), DeferredAction::Send(buf)) => {
                 let _ = self.socket.send(self.addr, peer_addr, buf).await;
@@ -202,7 +212,7 @@ where
         packet: &[u8],
     ) -> Result<(), DtlsError> {
         if let Some(connection) = &mut self.connections[connection_id.0] {
-            let mut buffer = ParseBuffer::init(self.staging_buffer.borrow_mut());
+            let mut buffer = ParseBuffer::init(self.context.staging_buffer.borrow_mut());
             let epoch_index = connection.current_epoch as usize & 3;
             let mut record = EncodeCiphertextRecord::new(
                 &mut buffer,
@@ -225,11 +235,11 @@ where
 
     async fn poll_async(
         &mut self,
-        now_ms: &TimeStampMs,
+        now_ms: &Milliseconds,
         handshakes: &mut [HandshakeSlot<'_>],
     ) -> Result<DtlsPoll, DtlsError> {
         let mut return_poll = DtlsPoll::Wait;
-        for handshake in handshakes {
+        for (handshake_index, handshake) in handshakes.iter_mut().enumerate() {
             let poll = match &mut handshake.state {
                 HandshakeSlotState::Running {
                     state,
@@ -246,34 +256,35 @@ where
                     let poll = match &mut new_state {
                         HandshakeState::Client(c) => {
                             process_client_async(
-                                c,
-                                now_ms,
-                                ctx,
-                                &mut handshake.rt_queue,
-                                conn,
-                                self.rng,
-                                self.staging_buffer,
+                                &mut self.context,
                                 &mut socket,
+                                handshake_index,
+                                ctx,
+                                c,
+                                &mut handshake.rt_queue,
+                                &handshake.settings,
+                                conn,
+                                now_ms,
                             )
                             .await
                         }
                         crate::HandshakeState::Server(s) => {
                             process_server_async(
-                                s,
-                                now_ms,
+                                &mut self.context,
+                                &mut socket,
+                                handshake_index,
                                 ctx,
+                                s,
                                 &mut handshake.rt_queue,
                                 conn,
-                                self.rng,
-                                self.staging_buffer,
-                                &mut socket,
+                                now_ms,
                             )
                             .await
                         }
                     };
                     try_send_alert_async(
                         &poll,
-                        self.staging_buffer,
+                        self.context.staging_buffer,
                         &mut socket,
                         &mut conn.epochs,
                         &conn.current_epoch,
@@ -290,8 +301,10 @@ where
                     }
                     poll
                 }
+                HandshakeSlotState::AcceptConnection => DtlsPoll::Wait,
                 HandshakeSlotState::Empty => DtlsPoll::Wait,
-                HandshakeSlotState::Finished(_) => DtlsPoll::FinishedHandshake,
+                HandshakeSlotState::Finished(_) => DtlsPoll::FinishedHandshake(handshake_index),
+                HandshakeSlotState::Aborted(_) => DtlsPoll::AbortedHandshake(handshake_index),
             };
             return_poll = return_poll.merge(poll);
         }
@@ -311,7 +324,7 @@ where
         };
         let mut handled = true;
         match try_pass_packet_to_connection(
-            self.staging_buffer,
+            self.context.staging_buffer,
             &mut self.connections,
             addr,
             packet_len,
@@ -327,9 +340,9 @@ where
         handled = true;
         trace!("Could not match packet to connection");
         match try_pass_packet_to_handshake(
-            self.staging_buffer,
-            &mut self.connections,
+            &mut self.context,
             handshakes,
+            &mut self.connections,
             addr,
             packet_len,
         )? {
@@ -343,9 +356,7 @@ where
         }
         trace!("Could not match packet to handshake");
         if let Some(buf) = try_open_new_handshake(
-            self.staging_buffer,
-            self.require_cookie,
-            &self.cookie_key,
+            &mut self.context,
             handshakes,
             &mut self.connections,
             addr,
@@ -357,7 +368,11 @@ where
     }
 
     pub fn require_cookie(&mut self, require_cookie: bool) {
-        self.require_cookie = require_cookie;
+        self.context.require_cookie = require_cookie;
+    }
+
+    pub fn select_group(&mut self, select_group: SelectNamedGroup) {
+        self.context.select_group = select_group
     }
 }
 
@@ -368,9 +383,9 @@ async fn try_send_alert_async<T, Socket: embedded_nal_async::UnconnectedUdp>(
     epoch_states: &mut [EpochState],
     epoch: &u64,
 ) {
-    if let Err(DtlsError::Alert(alert)) = error {
-        if let Ok(buf) = stage_alert(staging_buffer, epoch_states, epoch, *alert) {
-            let _ = socket.send(buf).await;
-        }
+    if let Err(DtlsError::Alert(alert)) = error
+        && let Ok(buf) = stage_alert(staging_buffer, epoch_states, epoch, *alert)
+    {
+        let _ = socket.send(buf).await;
     }
 }

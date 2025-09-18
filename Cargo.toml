@@ -9,10 +9,12 @@ autotests = true
 
 [dependencies]
 aes-gcm = { version = "0.10.0", default-features = false, features = ["aes"] }
+
+p256 = {version = "0.13.2", default-features = false, features = ["ecdh"], optional = true}
+
 sha2 = { version = "0.10.8", default-features = false }
 hkdf = "0.12.4"
 log = { version = "0.4" }
-heapless = "0.8.0"
 rand_core = { version = "0.6.4", default-features = false }
 
 embedded-hal-async = { version = "1", optional = true }
@@ -30,6 +32,8 @@ tokio = { version = "1.43.0", features = ["rt","rt-multi-thread", "macros"]}
 
 [features]
 
+default = ["time_size_u32"]
+
 async = [
   "dep:embedded-hal-async",
   "dep:embedded-time",
@@ -39,11 +43,27 @@ async = [
 
 silent = ["log/max_level_off", "log/release_max_level_off"]
 
+time_size_u32 = []
+time_size_u64 = []
+
 aes128gcm_sha256 = []
+
+secp256r1 = ["p256","_dhe"]
+
+_dhe = []
+
+[profile.check_binary_size]
+inherits = "release"
+opt-level = "z"
+debug = true
+strip = true
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 
 [[example]]
 name = "echo"
-required-features = ["aes128gcm_sha256"] 
+required-features = ["aes128gcm_sha256", "secp256r1"] 
 
 [[example]]
 name = "echo_async"

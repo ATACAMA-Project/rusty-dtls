@@ -1,28 +1,34 @@
 use core::net::{IpAddr, SocketAddr};
-use core::panic;
 
 use crate::handshake::CryptoInformation;
-use crate::parsing::HandshakeType;
+use crate::parsing::{HandshakeMsgType, NamedGroup};
 use crate::parsing_utility::{ParseBuffer, Parser};
-use crate::DtlsError;
+use crate::{DtlsError, Milliseconds, illegal_state, parse_err};
 
 #[cfg(feature = "aes128gcm_sha256")]
 use {aes_gcm::Aes128Gcm, sha2::digest::generic_array::typenum::Unsigned};
 
+#[cfg(feature = "_dhe")]
+use {
+    crate::AlertDescription,
+    crate::parsing_utility::{C, parse_expect_with},
+    core::ops::Range,
+};
+
 use aes_gcm::{
-    aes::{
-        cipher::{BlockEncrypt, BlockSizeUser},
-        Aes128,
-    },
     AeadCore, AeadInPlace, KeyInit, KeySizeUser,
+    aes::{
+        Aes128,
+        cipher::{BlockEncrypt, BlockSizeUser},
+    },
 };
 use hkdf::hmac::Mac;
-use hkdf::{hmac::SimpleHmac, Hkdf};
+use hkdf::{Hkdf, hmac::SimpleHmac};
 use log::trace;
 use sha2::digest::Update;
 use sha2::{
-    digest::{generic_array::GenericArray, FixedOutput, OutputSizeUser},
     Digest, Sha256,
+    digest::{FixedOutput, OutputSizeUser, generic_array::GenericArray},
 };
 
 pub struct PskTranscriptHashes {
@@ -75,7 +81,6 @@ impl PskTranscriptHashes {
                 let hash = calculate_hello_retry_transcript_hash::<Sha256>(&client_hello_1);
                 PskTranscriptHash::Sha256(hash)
             }
-            CipherSuite::NullCipherSuite => todo!(),
         }
     }
 }
@@ -103,7 +108,6 @@ impl PskTranscriptHash {
         match cipher_suite {
             #[cfg(feature = "aes128gcm_sha256")]
             CipherSuite::Aes128GcmSha256 => Self::Sha256(<Sha256 as Digest>::new()),
-            CipherSuite::NullCipherSuite => panic!(),
         }
     }
     pub fn update(&mut self, data: &[u8]) {
@@ -126,6 +130,7 @@ impl PskTranscriptHash {
             PskTranscriptHash::Sha256(h) => {
                 let mut h = h.clone();
                 partial_client_hello.iter().for_each(|part| {
+                    print_bytes!("TranscriptHash Update", part);
                     Digest::update(&mut h, part);
                 });
                 FinalizedPskTranscriptHash::Sha256(h.finalize())
@@ -133,6 +138,7 @@ impl PskTranscriptHash {
         }
     }
 }
+
 pub enum FinalizedPskTranscriptHash {
     Sha256(GenericArray<u8, <Sha256 as OutputSizeUser>::OutputSize>),
 }
@@ -145,6 +151,287 @@ impl AsRef<[u8]> for FinalizedPskTranscriptHash {
     }
 }
 
+pub fn supported_groups() -> &'static [NamedGroup] {
+    &[NamedGroup::Secp256r1]
+}
+
+pub struct NamedGroupSelectInfo {
+    pub(crate) v: u32,
+}
+
+impl NamedGroupSelectInfo {
+    const SECP256R1: u32 = 1;
+
+    /// Groups supported by this implementation
+    pub fn supported_groups(&self) -> &'static [NamedGroup] {
+        supported_groups()
+    }
+
+    pub fn group_offered(&self, group: NamedGroup) -> bool {
+        match group {
+            NamedGroup::Secp256r1 => self.v & Self::SECP256R1 > 0,
+            _ => false,
+        }
+    }
+
+    pub fn key_share_available(&self, group: NamedGroup) -> bool {
+        match group {
+            NamedGroup::Secp256r1 => self.v & (Self::SECP256R1 << 16) > 0,
+            _ => false,
+        }
+    }
+
+    #[cfg(feature = "_dhe")]
+    pub(crate) fn add_offered_group(&mut self, group: NamedGroup) {
+        match group {
+            NamedGroup::Secp256r1 => self.v |= Self::SECP256R1,
+            _ => {}
+        }
+    }
+
+    #[cfg(feature = "_dhe")]
+    pub(crate) fn check(&self) -> Result<(), DtlsError> {
+        if (self.v >> 16) & !(self.v & 0xFFFF) > 0 {
+            Err(DtlsError::Alert(AlertDescription::IllegalParameter))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub type SelectNamedGroup = fn(&NamedGroupSelectInfo) -> Option<NamedGroup>;
+
+pub fn default_select_named_group(
+    #[allow(unused)] ngi: &NamedGroupSelectInfo,
+) -> Option<NamedGroup> {
+    #[cfg(feature = "_dhe")]
+    {
+        for g in ngi.supported_groups() {
+            if ngi.key_share_available(*g) {
+                return Some(*g);
+            }
+        }
+        for g in ngi.supported_groups() {
+            if ngi.group_offered(*g) {
+                return Some(*g);
+            }
+        }
+    }
+    None
+}
+
+pub enum EcdheSharedKey {
+    #[cfg(feature = "secp256r1")]
+    Secp256r1(p256::ecdh::SharedSecret),
+}
+
+impl AsRef<[u8]> for EcdheSharedKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            #[cfg(feature = "secp256r1")]
+            EcdheSharedKey::Secp256r1(shared_secret) => shared_secret.raw_secret_bytes(),
+            #[cfg(not(any(feature = "secp256r1")))]
+            _ => &[],
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct KeyShares {
+    #[cfg(feature = "secp256r1")]
+    pub secp256r1: Option<p256::ecdh::EphemeralSecret>,
+}
+
+/// Glue for rust_crypto since it is generic about the rng
+/// instead of using dynamic dispatch as rusty-dlts is.
+#[cfg(feature = "_dhe")]
+struct RngWrapper<'a> {
+    rng: &'a mut dyn rand_core::CryptoRngCore,
+}
+
+#[cfg(feature = "_dhe")]
+impl<'a> rand_core::CryptoRng for RngWrapper<'a> {}
+
+#[cfg(feature = "_dhe")]
+impl<'a> rand_core::RngCore for RngWrapper<'a> {
+    fn next_u32(&mut self) -> u32 {
+        self.rng.next_u32()
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.rng.next_u64()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.rng.fill_bytes(dest);
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.rng.try_fill_bytes(dest)
+    }
+}
+
+#[cfg(feature = "_dhe")]
+impl KeyShares {
+    pub fn init_key_exchange(
+        &mut self,
+        rng: &mut dyn rand_core::CryptoRngCore,
+        group: NamedGroup,
+    ) -> Result<(), DtlsError> {
+        let mut rng = RngWrapper { rng };
+        match group {
+            #[cfg(feature = "secp256r1")]
+            NamedGroup::Secp256r1 => {
+                self.secp256r1 = Some(p256::ecdh::EphemeralSecret::random(&mut rng));
+                Ok(())
+            }
+            _ => Err(DtlsError::UnsupportedNamedGroup),
+        }
+    }
+
+    /// Does not encode the length of the encoded entries!
+    pub fn encode_available_key_share_entries(
+        &self,
+        buf: &mut ParseBuffer<'_>,
+    ) -> Result<(), DtlsError> {
+        #[cfg(feature = "secp256r1")]
+        if let Some(secp256r1) = &self.secp256r1 {
+            use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+            let p = secp256r1.public_key();
+            let mut r = Parser::new(buf)?
+                .write_u16(NamedGroup::Secp256r1 as u16)
+                .write_u16(1 + 32 * 2)
+                .access_static_slice();
+            let ep = p.as_affine().to_encoded_point(false);
+            let s: &mut [u8; 1 + 32 * 2] = r.slice_mut();
+            s.copy_from_slice(ep.as_bytes());
+            r.done().end();
+        }
+        Ok(())
+    }
+
+    pub fn calculate_ecdhe_key(
+        &self,
+        selected_group: NamedGroup,
+        buf: &[u8],
+    ) -> Result<EcdheSharedKey, DtlsError> {
+        match selected_group {
+            #[cfg(feature = "secp256r1")]
+            NamedGroup::Secp256r1 => {
+                print_bytes!("Public key", buf);
+                let p = p256::PublicKey::from_sec1_bytes(buf)
+                    .map_err(|_| DtlsError::Alert(AlertDescription::IllegalParameter))?;
+                let sc = self.secp256r1.as_ref().unwrap().diffie_hellman(&p);
+                Ok(EcdheSharedKey::Secp256r1(sc))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn key_exchange_initialized(&self, group: NamedGroup) -> bool {
+        match group {
+            #[cfg(feature = "secp256r1")]
+            NamedGroup::Secp256r1 => self.secp256r1.is_some(),
+            _ => false,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let mut r = true;
+        #[cfg(feature = "secp256r1")]
+        {
+            r &= self.secp256r1.is_none()
+        }
+        r
+    }
+
+    pub fn discard_unused_key_shares(&mut self, used_group: NamedGroup) {
+        #[cfg(feature = "secp256r1")]
+        if used_group != NamedGroup::Secp256r1 {
+            self.secp256r1 = None;
+        }
+    }
+}
+
+#[cfg(feature = "_dhe")]
+pub fn gather_available_key_share_entries(
+    buf: &mut ParseBuffer<'_>,
+    ng: &mut NamedGroupSelectInfo,
+) -> Result<(), DtlsError> {
+    let mut key_share_len = Parser::read_single_u16(buf)?;
+    buf.expect_length(key_share_len as usize)?;
+    while key_share_len > 0 {
+        let (group, r) = Parser::new(buf)?.read_u16();
+        let Some(group) = NamedGroup::from_num(group) else {
+            return Err(DtlsError::Alert(AlertDescription::IllegalParameter));
+        };
+        match group {
+            #[cfg(feature = "secp256r1")]
+            NamedGroup::Secp256r1 => {
+                ng.v |= NamedGroupSelectInfo::SECP256R1 << 16;
+            }
+            _ => {}
+        }
+        let (k_e_len, r) = r.read_u16();
+        r.end();
+        buf.add_offset(k_e_len as usize);
+        key_share_len -= 4 + k_e_len;
+    }
+    Ok(())
+}
+
+/// Expects the entire remaining
+/// buffer consists of key_shares
+/// and searches it for the selected group.
+///
+/// This just returns when the group is found
+/// and leaves the offset be.
+#[cfg(feature = "_dhe")]
+pub fn parse_key_share(
+    selected_group: NamedGroup,
+    buf: &mut ParseBuffer<'_>,
+) -> Result<Range<usize>, DtlsError> {
+    let end = buf.capacity();
+    while buf.offset() < end {
+        let (group, r) = Parser::new(buf)?.read_u16();
+        let Some(group) = NamedGroup::from_num(group) else {
+            return Err(illegal_state!());
+        };
+        let (k_e_len, r) = r.read_u16();
+        r.end();
+        if group == selected_group {
+            let r = parse_key_exchange(group, k_e_len, buf)?;
+            buf.set_offset(end);
+            return Ok(r);
+        } else {
+            buf.add_offset(k_e_len as usize);
+        }
+    }
+
+    Err(DtlsError::Alert(AlertDescription::HandshakeFailure))
+}
+
+/// Parses the content of the key_exchange field
+/// exluding the length field.
+/// This also validates the provided k_e_len.
+#[cfg(feature = "_dhe")]
+pub fn parse_key_exchange(
+    group: NamedGroup,
+    k_e_len: u16,
+    buf: &mut ParseBuffer<'_>,
+) -> Result<Range<usize>, DtlsError> {
+    match group {
+        #[cfg(feature = "secp256r1")]
+        NamedGroup::Secp256r1 => {
+            parse_expect_with(k_e_len == 1 + 64, || parse_err!())?;
+            let k_e = buf.offset()..buf.offset() + 1 + 64;
+            Parser::<C<{ 64 + 1 }, ()>>::new(buf)?.add_offset().end();
+            Ok(k_e)
+        }
+        _ => Err(DtlsError::Alert(AlertDescription::DecodeError)),
+    }
+}
+
 pub fn encode_cookie(
     buffer: &mut ParseBuffer<'_>,
     key: &[u8],
@@ -152,17 +439,20 @@ pub fn encode_cookie(
     peer_addr: &SocketAddr,
 ) -> Result<(), DtlsError> {
     let hash = hash.finalize(&[]);
+    #[allow(unused)]
     let start = buffer.offset();
     buffer.write_slice_checked(hash.as_ref())?;
     let mut hmac =
         <SimpleHmac<Sha256> as KeyInit>::new_from_slice(key).map_err(|_| DtlsError::CryptoError)?;
     Mac::update(&mut hmac, hash.as_ref());
-    match peer_addr.ip() {
+    match &peer_addr.ip() {
         IpAddr::V4(i) => Mac::update(&mut hmac, &i.to_bits().to_be_bytes()),
         IpAddr::V6(i) => Mac::update(&mut hmac, &i.to_bits().to_be_bytes()),
     }
-    let mac = hmac.finalize_fixed();
-    buffer.write_slice_checked(&mac)?;
+    let s = <Sha256 as OutputSizeUser>::output_size();
+    buffer.add_offset(s);
+    let slice = buffer.access_slice_mut_checked(buffer.offset() - s..buffer.offset())?;
+    hmac.finalize_into(slice.into());
     print_bytes!("Cookie", &buffer.as_ref()[start..]);
     Ok(())
 }
@@ -180,6 +470,7 @@ pub fn verify_cookie(cookie: &[u8], key: &[u8], peer_addr: &SocketAddr) -> Resul
     Ok(hmac.verify_slice(&cookie[cookie.len() - tag_len..]).is_ok())
 }
 
+#[derive(Clone)]
 pub struct Psk<'a> {
     pub(crate) identity: &'a [u8],
     pub(crate) psk: &'a [u8],
@@ -213,10 +504,11 @@ impl HashFunction {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum PskType {
     #[allow(unused)]
     Resumption {
-        ticket_creation_timestamp_ms: u64,
+        ticket_creation_timestamp_ms: Milliseconds,
     },
     External,
 }
@@ -224,7 +516,6 @@ pub(crate) enum PskType {
 #[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CipherSuite {
-    NullCipherSuite = 0x0,
     #[cfg(feature = "aes128gcm_sha256")]
     Aes128GcmSha256 = 0x1301,
 }
@@ -241,7 +532,6 @@ impl CipherSuite {
         match self {
             #[cfg(feature = "aes128gcm_sha256")]
             CipherSuite::Aes128GcmSha256 => HashFunction::Sha256,
-            CipherSuite::NullCipherSuite => panic!(),
         }
     }
 }
@@ -250,15 +540,15 @@ impl TryFrom<u16> for CipherSuite {
     type Error = DtlsError;
     fn try_from(value: u16) -> Result<Self, DtlsError> {
         match value {
-            0x0 => Ok(Self::NullCipherSuite),
             #[cfg(feature = "aes128gcm_sha256")]
             0x1301 => Ok(Self::Aes128GcmSha256),
-            _ => Err(DtlsError::ParseError),
+            _ => Err(parse_err!()),
         }
     }
 }
 
 pub enum TrafficSecret {
+    None,
     #[cfg(feature = "aes128gcm_sha256")]
     Aes128GcmSha256 {
         traffic_secret: GenericArray<u8, <Sha256 as OutputSizeUser>::OutputSize>,
@@ -266,7 +556,6 @@ pub enum TrafficSecret {
         iv: GenericArray<u8, <Aes128Gcm as AeadCore>::NonceSize>,
         sn: GenericArray<u8, <Aes128Gcm as KeySizeUser>::KeySize>,
     },
-    None,
 }
 
 pub fn mac_length(secret: &TrafficSecret) -> usize {
@@ -298,7 +587,7 @@ pub fn aead_encrypt_in_place(
         } => {
             encrypt_in_place::<Aes128Gcm>(key, iv, record_seq_num, additional_data, plaintext)?;
         }
-        TrafficSecret::None => panic!(),
+        TrafficSecret::None => return Err(illegal_state!()),
     }
     Ok(())
 }
@@ -328,7 +617,7 @@ pub fn aead_decrypt_in_place(
         } => {
             decrypt_in_place::<Aes128Gcm>(key, iv, record_seq_num, additional_data, ciphertext)?;
         }
-        TrafficSecret::None => panic!(),
+        TrafficSecret::None => return Err(illegal_state!()),
     }
     Ok(())
 }
@@ -352,14 +641,18 @@ pub fn xor_sequence_number(
             print_bytes!("sn", sn);
             xor_seq_num_aes128(sn, record_seq_num, cipher_text);
         }
-        TrafficSecret::None => panic!(),
+        TrafficSecret::None => return Err(illegal_state!()),
     };
     Ok(())
 }
 
-fn xor_seq_num_aes128(sn: &[u8], record_seq_num: &mut [u8], cipher_text: &[u8; 16]) {
+fn xor_seq_num_aes128(
+    sn: &GenericArray<u8, <Aes128 as KeySizeUser>::KeySize>,
+    record_seq_num: &mut [u8],
+    cipher_text: &[u8; 16],
+) {
     let mut mask = GenericArray::clone_from_slice(cipher_text);
-    Aes128::new_from_slice(sn).unwrap().encrypt_block(&mut mask);
+    Aes128::new(sn).encrypt_block(&mut mask);
     let seq_num_len = record_seq_num.len();
     record_seq_num
         .iter_mut()
@@ -373,36 +666,42 @@ pub enum CipherDependentCryptoState {
         transcript_hash: Sha256,
         hkdf_state: Hkdf<Sha256, SimpleHmac<Sha256>>,
     },
-    None,
 }
 
 impl CipherDependentCryptoState {
     pub fn new(
         cipher_suite: CipherSuite,
         psk: Option<&[u8]>,
+        ecdhe_key: Option<&[u8]>,
         hashes: CryptoInformation,
     ) -> Result<CipherDependentCryptoState, DtlsError> {
-        let empty_psk = GenericArray::<u8, <Sha256 as OutputSizeUser>::OutputSize>::default();
-        let psk = if let Some(psk) = psk {
-            psk
-        } else {
-            empty_psk.as_slice()
-        };
+        use crate::illegal_state;
         match cipher_suite {
             #[cfg(feature = "aes128gcm_sha256")]
             CipherSuite::Aes128GcmSha256 => {
-                let hkdf = Hkdf::<Sha256, SimpleHmac<Sha256>>::new(None, psk);
+                let empty_psk =
+                    GenericArray::<u8, <Sha256 as OutputSizeUser>::OutputSize>::default();
+                let psk = if let Some(psk) = psk {
+                    psk
+                } else {
+                    empty_psk.as_slice()
+                };
+
+                let mut hkdf = Hkdf::<Sha256, SimpleHmac<Sha256>>::new(None, psk);
+                if let Some(ecdhe) = ecdhe_key {
+                    print_bytes!("Shared Secret", ecdhe);
+                }
+                extract_new_hkdf_state(&mut hkdf, ecdhe_key)?;
                 let hash = match hashes {
                     CryptoInformation::PreServerHello(hashes) => hashes.sha256,
                     CryptoInformation::PostHelloRetry(PskTranscriptHash::Sha256(h)) => h,
-                    _ => Err(DtlsError::IllegalInnerState)?,
+                    _ => Err(illegal_state!())?,
                 };
                 Ok(CipherDependentCryptoState::Aes128GcmSha256 {
                     transcript_hash: hash,
                     hkdf_state: hkdf,
                 })
             }
-            CipherSuite::NullCipherSuite => panic!(),
         }
     }
 
@@ -416,7 +715,6 @@ impl CipherDependentCryptoState {
             } => {
                 Digest::update(transcript_hash, data);
             }
-            CipherDependentCryptoState::None => panic!(),
         }
     }
 
@@ -429,7 +727,6 @@ impl CipherDependentCryptoState {
             } => {
                 extract_new_hkdf_state::<Sha256>(hkdf_state, ikm)?;
             }
-            CipherDependentCryptoState::None => panic!(),
         }
         Ok(())
     }
@@ -450,7 +747,6 @@ impl CipherDependentCryptoState {
                     sn,
                 })
             }
-            CipherDependentCryptoState::None => panic!(),
         }
     }
 
@@ -477,8 +773,7 @@ impl CipherDependentCryptoState {
                 traffic_secret,
                 &transcript_hash.clone().finalize(),
             ),
-            (CipherDependentCryptoState::None, _) => panic!(),
-            (_, TrafficSecret::None) => panic!(),
+            (_, TrafficSecret::None) => Err(illegal_state!()),
         }
     }
 
@@ -505,8 +800,7 @@ impl CipherDependentCryptoState {
                 traffic_secret,
                 &transcript_hash.clone().finalize(),
             ),
-            (CipherDependentCryptoState::None, _) => panic!(),
-            (_, TrafficSecret::None) => panic!(),
+            (_, TrafficSecret::None) => Err(illegal_state!()),
         }
     }
 }
@@ -560,7 +854,7 @@ fn calculate_hello_retry_transcript_hash<H: Digest + Update>(client_hello_1_hash
 fn digest_client_hello_1_hash(hash: &mut dyn Update, client_hello_1_hash: &[u8]) {
     print_bytes!("Client Hello 1 Hash", client_hello_1_hash);
     hash.update(&[
-        HandshakeType::MessageHash as u8,
+        HandshakeMsgType::MessageHash as u8,
         0,
         0,
         client_hello_1_hash.len() as u8,
@@ -632,8 +926,7 @@ pub fn encode_binder_entry(
         HashFunction::Sha256 => &calculate_binder_value::<Sha256>(psk, transcript_hash)?,
     };
     Parser::new_mut_slice(buffer, binder)?
-        .write_len_u8()
-        .write_slice()
+        .write_slice_with_u8_len()
         .end();
     Ok(())
 }
@@ -675,7 +968,7 @@ pub fn calculate_verify_data<H: Digest + BlockSizeUser + OutputSizeUser + Clone>
 }
 
 fn encrypt_in_place<A: KeyInit + AeadInPlace>(
-    key: &[u8],
+    key: &GenericArray<u8, A::KeySize>,
     iv: &[u8],
     record_seq_num: &u64,
     additional_data: &[u8],
@@ -683,15 +976,14 @@ fn encrypt_in_place<A: KeyInit + AeadInPlace>(
 ) -> Result<(), DtlsError> {
     let mut nonce = GenericArray::default();
     generate_nonce(record_seq_num, iv, nonce.as_mut_slice());
-    A::new_from_slice(key)
-        .unwrap()
+    A::new(key)
         .encrypt_in_place(&nonce, additional_data, plaintext)
         .map_err(|_| DtlsError::CryptoError)?;
     Ok(())
 }
 
 fn decrypt_in_place<A: KeyInit + AeadInPlace>(
-    key: &[u8],
+    key: &GenericArray<u8, A::KeySize>,
     iv: &[u8],
     record_seq_num: &u64,
     additional_data: &[u8],
@@ -701,8 +993,7 @@ fn decrypt_in_place<A: KeyInit + AeadInPlace>(
     generate_nonce(record_seq_num, iv, nonce.as_mut_slice());
     let len = ciphertext.len();
     let mut ciphertext = ParseBuffer::init_with_offset(ciphertext, len);
-    A::new_from_slice(key)
-        .unwrap()
+    A::new(key)
         .decrypt_in_place(&nonce, additional_data, &mut ciphertext)
         .map_err(|_| DtlsError::CryptoError)?;
     Ok(())
