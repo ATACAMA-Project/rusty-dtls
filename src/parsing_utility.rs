@@ -281,7 +281,7 @@ impl<'a, 'b, const SIZE: usize, T> Parser<'a, 'b, C<SIZE, T>> {
 }
 
 impl<'a, 'b, I: InitConst, T> Parser<'a, 'b, C<2, Itr<I, T>>> {
-    /// Writes the dynamic lenght as u16
+    /// Writes the dynamic length as u16
     pub fn write_dyn_len_u16(self) -> Parser<'a, 'b, Itr<I, T>> {
         self.buf.write_u16(self.s.t.len_left as u16);
         self.unpack()
@@ -451,7 +451,6 @@ impl<'a> ParseBuffer<'a> {
             .and_then(|b| b.split_last_chunk_mut::<8>())
             .unwrap()
             .1 = val.to_be_bytes();
-        // self.buf[self.offset - 8..self.offset].copy_from_slice(&val.to_be_bytes());
     }
 
     pub fn write_slice_checked(&mut self, slice: &[u8]) -> Result<(), DtlsError> {
@@ -517,29 +516,6 @@ impl<'a> ParseBuffer<'a> {
             .1 = (length as u16).to_be_bytes();
         Ok(())
     }
-
-    // pub fn write_prepend_len_u16(
-    //     &mut self,
-    //     variable_content: &mut dyn FnMut(&mut Self) -> Result<(), DtlsError>,
-    // ) -> Result<usize, DtlsError> {
-    //     self.write_prepend_length(2, variable_content)
-    //     self.expect_length(2)?;
-    //     self.offset += 2;
-    //     let offset_begin = self.offset;
-    //     variable_content(self)?;
-    //     let length = self.offset - offset_begin;
-    //     if length > u16::MAX as usize {
-    //         return Err(DtlsError::ParseError);
-    //     }
-    //     *self
-    //         .buf
-    //         .get_mut(offset_begin - 2..offset_begin)
-    //         .and_then(|b| b.split_last_chunk_mut::<2>())
-    //         .unwrap()
-    //         .1 = (length as u16).to_be_bytes();
-
-    //     Ok(length)
-    // }
 
     /// Increases offset but does not write anything.
     pub fn add_offset(&mut self, len: usize) {

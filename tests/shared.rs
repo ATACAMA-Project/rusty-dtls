@@ -156,7 +156,10 @@ impl Proxy {
                     psks: Arc::new(vec![Psk::new(
                         &[123],
                         &[1, 2, 3, 4, 5],
+                        #[cfg(feature = "aes128gcm_sha256")]
                         HashFunction::Sha256,
+                        #[cfg(feature = "aes256gcm_sha384")]
+                        HashFunction::Sha384,
                     )]),
                 },
             },
@@ -173,7 +176,10 @@ impl Proxy {
                     psks: Arc::new(vec![Psk::new(
                         &[123],
                         &[1, 2, 3, 4, 5],
+                        #[cfg(feature = "aes128gcm_sha256")]
                         HashFunction::Sha256,
+                        #[cfg(feature = "aes256gcm_sha384")]
+                        HashFunction::Sha384,
                     )]),
                 },
             },
@@ -645,7 +651,7 @@ fn run_handshake(
         let mut timeout = None;
         match poll {
             DtlsPoll::WaitTimeoutMs(ms) => {
-                // debug!("[{own_port}] Wait {ms}");
+                debug!("[{own_port}] Wait {ms}");
                 timeout = Some(Duration::from_millis(ms as u64 / 2));
             }
             DtlsPoll::Wait => {
@@ -763,6 +769,7 @@ pub fn handshake_test(proxy: Proxy) {
     assert_eq!(result.abort_reason,client_hs_cfg.expected_abort);
 
     proxy_stopper.stop();
+    thread::sleep(Duration::from_millis(10));
 
     assert!(s.is_finished() , "Server did not stop!");
     s.join().unwrap();

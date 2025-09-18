@@ -21,6 +21,8 @@ jobs:
       run: cargo test --features aes128gcm_sha256 --lib
     - name: Run sync basic_tests
       run: cargo test --features aes128gcm_sha256 --test basic_tests --verbose
+    - name: Run sync aes256gcm_sha384 basic_tests
+      run: cargo test --features aes256gcm_sha384 --test basic_tests --verbose
     - name: Run async basic_tests
       run: cargo test --features aes128gcm_sha256 --features async --test basic_tests --verbose
     - name: Run sync dhe_tests

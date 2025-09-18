@@ -1,3 +1,4 @@
+#[cfg(feature = "aes128gcm_sha256")]
 use rusty_dtls::{AlertDescription, HashFunction, Psk};
 
 use crate::shared::{C_MSGS_DFLT, Proxy, S_MSGS_DFLT, handshake_test};
@@ -14,6 +15,7 @@ fn simple_handshake() {
     handshake_test(proxy)
 }
 
+#[cfg(feature = "aes128gcm_sha256")]
 #[test]
 fn multiple_psks() {
     let mut proxy = Proxy::new();
@@ -32,6 +34,7 @@ fn multiple_psks() {
     handshake_test(proxy);
 }
 
+#[cfg(feature = "aes128gcm_sha256")]
 #[test]
 fn empty_psk_id() {
     let mut proxy = Proxy::new();

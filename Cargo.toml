@@ -47,6 +47,7 @@ time_size_u32 = []
 time_size_u64 = []
 
 aes128gcm_sha256 = []
+aes256gcm_sha384 = []
 
 secp256r1 = ["p256","_dhe"]
 

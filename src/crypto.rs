@@ -6,7 +6,10 @@ use crate::parsing_utility::{ParseBuffer, Parser};
 use crate::{DtlsError, Milliseconds, illegal_state, parse_err};
 
 #[cfg(feature = "aes128gcm_sha256")]
-use {aes_gcm::Aes128Gcm, sha2::digest::generic_array::typenum::Unsigned};
+use {aes_gcm::Aes128Gcm, aes_gcm::aes::Aes128};
+
+#[cfg(feature = "aes256gcm_sha384")]
+use {aes_gcm::Aes256Gcm, aes_gcm::aes::Aes256, sha2::Sha384};
 
 #[cfg(feature = "_dhe")]
 use {
@@ -17,23 +20,24 @@ use {
 
 use aes_gcm::{
     AeadCore, AeadInPlace, KeyInit, KeySizeUser,
-    aes::{
-        Aes128,
-        cipher::{BlockEncrypt, BlockSizeUser},
-    },
+    aes::cipher::{BlockEncrypt, BlockSizeUser},
 };
 use hkdf::hmac::Mac;
 use hkdf::{Hkdf, hmac::SimpleHmac};
 use log::trace;
-use sha2::digest::Update;
 use sha2::{
     Digest, Sha256,
-    digest::{FixedOutput, OutputSizeUser, generic_array::GenericArray},
+    digest::{
+        FixedOutput, OutputSizeUser, Update,
+        generic_array::{GenericArray, typenum::Unsigned},
+    },
 };
 
 pub struct PskTranscriptHashes {
     #[cfg(feature = "aes128gcm_sha256")]
     pub(crate) sha256: Sha256,
+    #[cfg(feature = "aes256gcm_sha384")]
+    pub(crate) sha384: Sha384,
 }
 
 impl Default for PskTranscriptHashes {
@@ -47,6 +51,8 @@ impl PskTranscriptHashes {
         Self {
             #[cfg(feature = "aes128gcm_sha256")]
             sha256: <Sha256 as Digest>::new(),
+            #[cfg(feature = "aes256gcm_sha384")]
+            sha384: <Sha384 as Digest>::new(),
         }
     }
 
@@ -54,6 +60,9 @@ impl PskTranscriptHashes {
         print_bytes!("TranscriptHash Update", data);
         #[cfg(feature = "aes128gcm_sha256")]
         Digest::update(&mut self.sha256, data);
+
+        #[cfg(feature = "aes256gcm_sha384")]
+        Digest::update(&mut self.sha384, data);
     }
 
     pub fn finalize(&self, partial_client_hello: &[&[u8]]) -> FinalizedPskTranscriptHashes {
@@ -61,6 +70,14 @@ impl PskTranscriptHashes {
             #[cfg(feature = "aes128gcm_sha256")]
             sha256: {
                 let mut hash = self.sha256.clone();
+                partial_client_hello.iter().for_each(|part| {
+                    Digest::update(&mut hash, part);
+                });
+                hash.finalize()
+            },
+            #[cfg(feature = "aes256gcm_sha384")]
+            sha384: {
+                let mut hash = self.sha384.clone();
                 partial_client_hello.iter().for_each(|part| {
                     Digest::update(&mut hash, part);
                 });
@@ -81,6 +98,12 @@ impl PskTranscriptHashes {
                 let hash = calculate_hello_retry_transcript_hash::<Sha256>(&client_hello_1);
                 PskTranscriptHash::Sha256(hash)
             }
+            #[cfg(feature = "aes256gcm_sha384")]
+            CipherSuite::Aes256GcmSha384 => {
+                let client_hello_1 = self.sha384.finalize();
+                let hash = calculate_hello_retry_transcript_hash::<Sha384>(&client_hello_1);
+                PskTranscriptHash::Sha384(hash)
+            }
         }
     }
 }
@@ -88,6 +111,8 @@ impl PskTranscriptHashes {
 pub struct FinalizedPskTranscriptHashes {
     #[cfg(feature = "aes128gcm_sha256")]
     pub(crate) sha256: GenericArray<u8, <Sha256 as OutputSizeUser>::OutputSize>,
+    #[cfg(feature = "aes256gcm_sha384")]
+    pub(crate) sha384: GenericArray<u8, <Sha384 as OutputSizeUser>::OutputSize>,
 }
 
 impl FinalizedPskTranscriptHashes {
@@ -95,12 +120,17 @@ impl FinalizedPskTranscriptHashes {
         match hash_fn {
             #[cfg(feature = "aes128gcm_sha256")]
             HashFunction::Sha256 => &self.sha256,
+            #[cfg(feature = "aes256gcm_sha384")]
+            HashFunction::Sha384 => &self.sha384,
         }
     }
 }
 
 pub enum PskTranscriptHash {
+    #[cfg(feature = "aes128gcm_sha256")]
     Sha256(Sha256),
+    #[cfg(feature = "aes256gcm_sha384")]
+    Sha384(Sha384),
 }
 
 impl PskTranscriptHash {
@@ -108,25 +138,36 @@ impl PskTranscriptHash {
         match cipher_suite {
             #[cfg(feature = "aes128gcm_sha256")]
             CipherSuite::Aes128GcmSha256 => Self::Sha256(<Sha256 as Digest>::new()),
+            #[cfg(feature = "aes256gcm_sha384")]
+            CipherSuite::Aes256GcmSha384 => Self::Sha384(<Sha384 as Digest>::new()),
         }
     }
     pub fn update(&mut self, data: &[u8]) {
         print_bytes!("TranscriptHash Update", data);
         match self {
+            #[cfg(feature = "aes128gcm_sha256")]
             PskTranscriptHash::Sha256(h) => Digest::update(h, data),
+            #[cfg(feature = "aes256gcm_sha384")]
+            PskTranscriptHash::Sha384(h) => Digest::update(h, data),
         }
     }
 
     pub fn server_digest_cookie_hash(&mut self, cookie: &[u8]) {
         match self {
+            #[cfg(feature = "aes128gcm_sha256")]
             PskTranscriptHash::Sha256(h) => {
                 digest_client_hello_1_hash(h, &cookie[..<Sha256 as OutputSizeUser>::output_size()])
+            }
+            #[cfg(feature = "aes256gcm_sha384")]
+            PskTranscriptHash::Sha384(h) => {
+                digest_client_hello_1_hash(h, &cookie[..<Sha384 as OutputSizeUser>::output_size()])
             }
         }
     }
 
     pub fn finalize(&self, partial_client_hello: &[&[u8]]) -> FinalizedPskTranscriptHash {
         match self {
+            #[cfg(feature = "aes128gcm_sha256")]
             PskTranscriptHash::Sha256(h) => {
                 let mut h = h.clone();
                 partial_client_hello.iter().for_each(|part| {
@@ -135,18 +176,33 @@ impl PskTranscriptHash {
                 });
                 FinalizedPskTranscriptHash::Sha256(h.finalize())
             }
+            #[cfg(feature = "aes256gcm_sha384")]
+            PskTranscriptHash::Sha384(h) => {
+                let mut h = h.clone();
+                partial_client_hello.iter().for_each(|part| {
+                    print_bytes!("TranscriptHash Update", part);
+                    Digest::update(&mut h, part);
+                });
+                FinalizedPskTranscriptHash::Sha384(h.finalize())
+            }
         }
     }
 }
 
 pub enum FinalizedPskTranscriptHash {
+    #[cfg(feature = "aes128gcm_sha256")]
     Sha256(GenericArray<u8, <Sha256 as OutputSizeUser>::OutputSize>),
+    #[cfg(feature = "aes256gcm_sha384")]
+    Sha384(GenericArray<u8, <Sha384 as OutputSizeUser>::OutputSize>),
 }
 
 impl AsRef<[u8]> for FinalizedPskTranscriptHash {
     fn as_ref(&self) -> &[u8] {
         match self {
+            #[cfg(feature = "aes128gcm_sha256")]
             FinalizedPskTranscriptHash::Sha256(h) => h,
+            #[cfg(feature = "aes256gcm_sha384")]
+            FinalizedPskTranscriptHash::Sha384(h) => h,
         }
     }
 }
@@ -412,7 +468,7 @@ pub fn parse_key_share(
 }
 
 /// Parses the content of the key_exchange field
-/// exluding the length field.
+/// excluding the length field.
 /// This also validates the provided k_e_len.
 #[cfg(feature = "_dhe")]
 pub fn parse_key_exchange(
@@ -493,6 +549,8 @@ impl<'a> Psk<'a> {
 pub enum HashFunction {
     #[cfg(feature = "aes128gcm_sha256")]
     Sha256,
+    #[cfg(feature = "aes256gcm_sha384")]
+    Sha384,
 }
 
 impl HashFunction {
@@ -500,6 +558,8 @@ impl HashFunction {
         match self {
             #[cfg(feature = "aes128gcm_sha256")]
             HashFunction::Sha256 => <Sha256 as OutputSizeUser>::output_size(),
+            #[cfg(feature = "aes256gcm_sha384")]
+            HashFunction::Sha384 => <Sha384 as OutputSizeUser>::output_size(),
         }
     }
 }
@@ -518,6 +578,8 @@ pub(crate) enum PskType {
 pub enum CipherSuite {
     #[cfg(feature = "aes128gcm_sha256")]
     Aes128GcmSha256 = 0x1301,
+    #[cfg(feature = "aes256gcm_sha384")]
+    Aes256GcmSha384 = 0x1302,
 }
 
 impl CipherSuite {
@@ -525,6 +587,8 @@ impl CipherSuite {
         &[
             #[cfg(feature = "aes128gcm_sha256")]
             CipherSuite::Aes128GcmSha256,
+            #[cfg(feature = "aes256gcm_sha384")]
+            CipherSuite::Aes256GcmSha384,
         ]
     }
 
@@ -532,6 +596,8 @@ impl CipherSuite {
         match self {
             #[cfg(feature = "aes128gcm_sha256")]
             CipherSuite::Aes128GcmSha256 => HashFunction::Sha256,
+            #[cfg(feature = "aes256gcm_sha384")]
+            CipherSuite::Aes256GcmSha384 => HashFunction::Sha384,
         }
     }
 }
@@ -542,6 +608,8 @@ impl TryFrom<u16> for CipherSuite {
         match value {
             #[cfg(feature = "aes128gcm_sha256")]
             0x1301 => Ok(Self::Aes128GcmSha256),
+            #[cfg(feature = "aes256gcm_sha384")]
+            0x1302 => Ok(Self::Aes256GcmSha384),
             _ => Err(parse_err!()),
         }
     }
@@ -556,6 +624,13 @@ pub enum TrafficSecret {
         iv: GenericArray<u8, <Aes128Gcm as AeadCore>::NonceSize>,
         sn: GenericArray<u8, <Aes128Gcm as KeySizeUser>::KeySize>,
     },
+    #[cfg(feature = "aes256gcm_sha384")]
+    Aes256GcmSha384 {
+        traffic_secret: GenericArray<u8, <Sha384 as OutputSizeUser>::OutputSize>,
+        key: GenericArray<u8, <Aes256Gcm as KeySizeUser>::KeySize>,
+        iv: GenericArray<u8, <Aes256Gcm as AeadCore>::NonceSize>,
+        sn: GenericArray<u8, <Aes256Gcm as KeySizeUser>::KeySize>,
+    },
 }
 
 pub fn mac_length(secret: &TrafficSecret) -> usize {
@@ -567,6 +642,14 @@ pub fn mac_length(secret: &TrafficSecret) -> usize {
             iv: _,
             sn: _,
         } => <Aes128Gcm as AeadCore>::TagSize::to_usize(),
+        #[cfg(feature = "aes256gcm_sha384")]
+        TrafficSecret::Aes256GcmSha384 {
+            traffic_secret: _,
+            key: _,
+            iv: _,
+            sn: _,
+        } => <Aes256Gcm as AeadCore>::TagSize::to_usize(),
+
         _ => unreachable!("Invalid cipher suite"), // Rust requires this branch for references
     }
 }
@@ -587,6 +670,14 @@ pub fn aead_encrypt_in_place(
         } => {
             encrypt_in_place::<Aes128Gcm>(key, iv, record_seq_num, additional_data, plaintext)?;
         }
+        #[cfg(feature = "aes256gcm_sha384")]
+        TrafficSecret::Aes256GcmSha384 {
+            traffic_secret: _,
+            key,
+            iv,
+            sn: _,
+        } => encrypt_in_place::<Aes256Gcm>(key, iv, record_seq_num, additional_data, plaintext)?,
+
         TrafficSecret::None => return Err(illegal_state!()),
     }
     Ok(())
@@ -617,6 +708,15 @@ pub fn aead_decrypt_in_place(
         } => {
             decrypt_in_place::<Aes128Gcm>(key, iv, record_seq_num, additional_data, ciphertext)?;
         }
+        #[cfg(feature = "aes256gcm_sha384")]
+        TrafficSecret::Aes256GcmSha384 {
+            traffic_secret: _,
+            key,
+            iv,
+            sn: _,
+        } => {
+            decrypt_in_place::<Aes256Gcm>(key, iv, record_seq_num, additional_data, ciphertext)?;
+        }
         TrafficSecret::None => return Err(illegal_state!()),
     }
     Ok(())
@@ -630,6 +730,7 @@ pub fn xor_sequence_number(
     debug_assert!(record_seq_num.len() == 1 || record_seq_num.len() == 2);
     trace!("xor_seq_num: seq_num: {record_seq_num:x?}");
     print_bytes!("cipher_text", cipher_text);
+    let mut mask = GenericArray::clone_from_slice(cipher_text);
     match secret {
         #[cfg(feature = "aes128gcm_sha256")]
         TrafficSecret::Aes128GcmSha256 {
@@ -639,20 +740,26 @@ pub fn xor_sequence_number(
             sn,
         } => {
             print_bytes!("sn", sn);
-            xor_seq_num_aes128(sn, record_seq_num, cipher_text);
+            Aes128::new(sn).encrypt_block(&mut mask);
+            xor_seq_num(&mask, record_seq_num);
+        }
+        #[cfg(feature = "aes256gcm_sha384")]
+        TrafficSecret::Aes256GcmSha384 {
+            traffic_secret: _,
+            key: _,
+            iv: _,
+            sn,
+        } => {
+            print_bytes!("sn", sn);
+            Aes256::new(sn).encrypt_block(&mut mask);
+            xor_seq_num(&mask, record_seq_num);
         }
         TrafficSecret::None => return Err(illegal_state!()),
     };
     Ok(())
 }
 
-fn xor_seq_num_aes128(
-    sn: &GenericArray<u8, <Aes128 as KeySizeUser>::KeySize>,
-    record_seq_num: &mut [u8],
-    cipher_text: &[u8; 16],
-) {
-    let mut mask = GenericArray::clone_from_slice(cipher_text);
-    Aes128::new(sn).encrypt_block(&mut mask);
+fn xor_seq_num(mask: &[u8], record_seq_num: &mut [u8]) {
     let seq_num_len = record_seq_num.len();
     record_seq_num
         .iter_mut()
@@ -666,6 +773,11 @@ pub enum CipherDependentCryptoState {
         transcript_hash: Sha256,
         hkdf_state: Hkdf<Sha256, SimpleHmac<Sha256>>,
     },
+    #[cfg(feature = "aes256gcm_sha384")]
+    Aes256GcmSha384 {
+        transcript_hash: Sha384,
+        hkdf_state: Hkdf<Sha384, SimpleHmac<Sha384>>,
+    },
 }
 
 impl CipherDependentCryptoState {
@@ -675,7 +787,9 @@ impl CipherDependentCryptoState {
         ecdhe_key: Option<&[u8]>,
         hashes: CryptoInformation,
     ) -> Result<CipherDependentCryptoState, DtlsError> {
-        use crate::illegal_state;
+        if let Some(ecdhe) = ecdhe_key {
+            print_bytes!("Shared Secret", ecdhe);
+        }
         match cipher_suite {
             #[cfg(feature = "aes128gcm_sha256")]
             CipherSuite::Aes128GcmSha256 => {
@@ -688,9 +802,6 @@ impl CipherDependentCryptoState {
                 };
 
                 let mut hkdf = Hkdf::<Sha256, SimpleHmac<Sha256>>::new(None, psk);
-                if let Some(ecdhe) = ecdhe_key {
-                    print_bytes!("Shared Secret", ecdhe);
-                }
                 extract_new_hkdf_state(&mut hkdf, ecdhe_key)?;
                 let hash = match hashes {
                     CryptoInformation::PreServerHello(hashes) => hashes.sha256,
@@ -698,6 +809,28 @@ impl CipherDependentCryptoState {
                     _ => Err(illegal_state!())?,
                 };
                 Ok(CipherDependentCryptoState::Aes128GcmSha256 {
+                    transcript_hash: hash,
+                    hkdf_state: hkdf,
+                })
+            }
+            #[cfg(feature = "aes256gcm_sha384")]
+            CipherSuite::Aes256GcmSha384 => {
+                let empty_psk =
+                    GenericArray::<u8, <Sha384 as OutputSizeUser>::OutputSize>::default();
+                let psk = if let Some(psk) = psk {
+                    psk
+                } else {
+                    empty_psk.as_slice()
+                };
+
+                let mut hkdf = Hkdf::<Sha384, SimpleHmac<Sha384>>::new(None, psk);
+                extract_new_hkdf_state(&mut hkdf, ecdhe_key)?;
+                let hash = match hashes {
+                    CryptoInformation::PreServerHello(hashes) => hashes.sha384,
+                    CryptoInformation::PostHelloRetry(PskTranscriptHash::Sha384(h)) => h,
+                    _ => Err(illegal_state!())?,
+                };
+                Ok(CipherDependentCryptoState::Aes256GcmSha384 {
                     transcript_hash: hash,
                     hkdf_state: hkdf,
                 })
@@ -715,6 +848,13 @@ impl CipherDependentCryptoState {
             } => {
                 Digest::update(transcript_hash, data);
             }
+            #[cfg(feature = "aes256gcm_sha384")]
+            CipherDependentCryptoState::Aes256GcmSha384 {
+                transcript_hash,
+                hkdf_state: _,
+            } => {
+                Digest::update(transcript_hash, data);
+            }
         }
     }
 
@@ -726,6 +866,13 @@ impl CipherDependentCryptoState {
                 hkdf_state,
             } => {
                 extract_new_hkdf_state::<Sha256>(hkdf_state, ikm)?;
+            }
+            #[cfg(feature = "aes256gcm_sha384")]
+            CipherDependentCryptoState::Aes256GcmSha384 {
+                transcript_hash: _,
+                hkdf_state,
+            } => {
+                extract_new_hkdf_state::<Sha384>(hkdf_state, ikm)?;
             }
         }
         Ok(())
@@ -741,6 +888,20 @@ impl CipherDependentCryptoState {
                 let (traffic_secret, key, iv, sn) =
                     derive_traffic_secret::<Aes128Gcm, Sha256>(hkdf_state, transcript_hash, label)?;
                 Ok(TrafficSecret::Aes128GcmSha256 {
+                    traffic_secret,
+                    key,
+                    iv,
+                    sn,
+                })
+            }
+            #[cfg(feature = "aes256gcm_sha384")]
+            CipherDependentCryptoState::Aes256GcmSha384 {
+                transcript_hash,
+                hkdf_state,
+            } => {
+                let (traffic_secret, key, iv, sn) =
+                    derive_traffic_secret::<Aes256Gcm, Sha384>(hkdf_state, transcript_hash, label)?;
+                Ok(TrafficSecret::Aes256GcmSha384 {
                     traffic_secret,
                     key,
                     iv,
@@ -773,7 +934,24 @@ impl CipherDependentCryptoState {
                 traffic_secret,
                 &transcript_hash.clone().finalize(),
             ),
-            (_, TrafficSecret::None) => Err(illegal_state!()),
+            #[cfg(feature = "aes256gcm_sha384")]
+            (
+                CipherDependentCryptoState::Aes256GcmSha384 {
+                    transcript_hash,
+                    hkdf_state: _,
+                },
+                TrafficSecret::Aes256GcmSha384 {
+                    traffic_secret,
+                    key: _,
+                    iv: _,
+                    sn: _,
+                },
+            ) => encode_verify_data::<Sha384>(
+                buffer,
+                traffic_secret,
+                &transcript_hash.clone().finalize(),
+            ),
+            (_, _) => Err(illegal_state!()),
         }
     }
 
@@ -800,7 +978,24 @@ impl CipherDependentCryptoState {
                 traffic_secret,
                 &transcript_hash.clone().finalize(),
             ),
-            (_, TrafficSecret::None) => Err(illegal_state!()),
+            #[cfg(feature = "aes256gcm_sha384")]
+            (
+                CipherDependentCryptoState::Aes256GcmSha384 {
+                    transcript_hash,
+                    hkdf_state: _,
+                },
+                TrafficSecret::Aes256GcmSha384 {
+                    traffic_secret,
+                    key: _,
+                    iv: _,
+                    sn: _,
+                },
+            ) => check_verify_data::<Sha384>(
+                buffer,
+                traffic_secret,
+                &transcript_hash.clone().finalize(),
+            ),
+            (_, _) => Err(illegal_state!()),
         }
     }
 }
@@ -910,6 +1105,10 @@ pub fn validate_binder(
         HashFunction::Sha256 => {
             received_binder == calculate_binder_value::<Sha256>(psk, transcript_hash)?.as_slice()
         }
+        #[cfg(feature = "aes256gcm_sha384")]
+        HashFunction::Sha384 => {
+            received_binder == calculate_binder_value::<Sha384>(psk, transcript_hash)?.as_slice()
+        }
     };
     Ok(valid)
 }
@@ -924,6 +1123,8 @@ pub fn encode_binder_entry(
     let binder: &[u8] = match psk.hash_function {
         #[cfg(feature = "aes128gcm_sha256")]
         HashFunction::Sha256 => &calculate_binder_value::<Sha256>(psk, transcript_hash)?,
+        #[cfg(feature = "aes256gcm_sha384")]
+        HashFunction::Sha384 => &calculate_binder_value::<Sha384>(psk, transcript_hash)?,
     };
     Parser::new_mut_slice(buffer, binder)?
         .write_slice_with_u8_len()

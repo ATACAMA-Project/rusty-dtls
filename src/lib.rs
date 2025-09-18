@@ -493,7 +493,6 @@ fn find_empty_connection_slot(connections: &mut [Option<DtlsConnection>]) -> Opt
     None
 }
 
-// #[inline(never)]
 fn try_open_new_handshake<'a>(
     stk_ctx: &'a mut StackContext,
     handshakes: &mut [HandshakeSlot],
